@@ -1,12 +1,25 @@
+# NOTE: git does NOT support trailing comments on pattern lines.
+# `token.json   # a comment` is read as a literal filename, matching nothing.
+# Every comment below therefore sits on its own line.
+
 # --- Secrets and credentials — never commit these -------------------------
 .env
-credentials.json          # Google OAuth client secrets
-token.json                # cached OAuth token (a live credential)
 *.pem
 
+# Google OAuth client secrets
+credentials.json
+
+# Cached OAuth token — this is a live credential
+token.json
+
 # --- Run artefacts --------------------------------------------------------
-sync_state.json           # checkpoint; machine-specific, safe to delete
-output/                   # extracted_tasks.json, needs_review.json
+
+# Checkpoint; machine-specific, safe to delete
+sync_state.json
+
+# extracted_tasks.json, needs_review.json
+output/
+
 *.log
 
 # --- Python ---------------------------------------------------------------
