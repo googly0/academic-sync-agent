@@ -57,12 +57,27 @@ class OllamaExtractor(LLMExtractor):
         model: str = DEFAULT_MODEL,
         host: str = DEFAULT_HOST,
         timeout: float = 600.0,
-        max_chunk_chars: int = 12_000,
+        max_chunk_chars: int = 6_000,
+        num_ctx: int = 8192,
     ) -> None:
         super().__init__(max_chunk_chars=max_chunk_chars)
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
+        self.num_ctx = num_ctx
+        # Rough guard against Ollama's silent truncation. It does not error
+        # when prompt + output exceed num_ctx — it quietly drops tokens, which
+        # would look like "the syllabus had fewer deadlines than it does".
+        # ~3.5 chars/token is conservative for English prose; the rest of the
+        # window is left for the system prompt and the JSON response.
+        estimated_prompt_tokens = max_chunk_chars / 3.5 + 900
+        if estimated_prompt_tokens > num_ctx * 0.75:
+            logger.warning(
+                "chunk size %d chars may not fit a %d-token context window; "
+                "lower --chunk-chars or raise num_ctx if tasks go missing",
+                max_chunk_chars,
+                num_ctx,
+            )
 
     def _extract_from_text(
         self, text: str, context: ExtractionContext
@@ -71,9 +86,16 @@ class OllamaExtractor(LLMExtractor):
             "model": self.model,
             "stream": False,
             "format": SyllabusExtraction.model_json_schema(),
-            # Local models drift far more than frontier ones; a low temperature
-            # keeps verbatim copying of date phrases actually verbatim.
-            "options": {"temperature": 0.0},
+            "options": {
+                # Local models drift far more than frontier ones; a low
+                # temperature keeps verbatim copying of date phrases actually
+                # verbatim.
+                "temperature": 0.0,
+                # Set explicitly rather than inheriting Ollama's 4096 default:
+                # a syllabus chunk plus this system prompt overflows that, and
+                # the overflow is silent.
+                "num_ctx": self.num_ctx,
+            },
             "messages": [
                 {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                 {
