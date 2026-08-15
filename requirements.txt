@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Autonomous Academic Management Agent — pinned to major versions.
+#
+# Every pin is `>=x.y,<X+1.0` so patch/minor upgrades flow in but a major
+# version bump (which may break the API surface) never happens silently.
+# ---------------------------------------------------------------------------
+
+# --- Stage 1: PDF extraction -----------------------------------------------
+PyPDF2>=3.0,<4.0            # text-layer extraction for digital PDFs
+pdf2image>=1.17,<2.0        # rasterises pages for OCR (requires `poppler`)
+pytesseract>=0.3.10,<0.4    # Tesseract OCR bindings (requires `tesseract`)
+Pillow>=10.0,<12.0          # image backend used by pdf2image/pytesseract
+
+# --- Stage 2: Semantic extraction (LLM) ------------------------------------
+anthropic>=0.40,<1.0        # default LLMExtractor backend
+
+# --- Stage 3/4: Resolution + validation ------------------------------------
+python-dateutil>=2.9,<3.0   # constrained calendar-date parsing (never fuzzy)
+pydantic>=2.7,<3.0          # the validation gate between stages
+
+# --- Stage 5: Calendar sync ------------------------------------------------
+google-api-python-client>=2.100,<3.0
+google-auth>=2.30,<3.0
+google-auth-oauthlib>=1.2,<2.0
+google-auth-httplib2>=0.2,<1.0
+
+# --- Misc ------------------------------------------------------------------
+python-dotenv>=1.0,<2.0     # loads ANTHROPIC_API_KEY etc. from .env
+
+# --- Dev / test ------------------------------------------------------------
+pytest>=8.0,<9.0

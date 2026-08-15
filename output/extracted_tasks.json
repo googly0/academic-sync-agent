@@ -1,0 +1,85 @@
+{
+  "source_pdf": "examples/sample_syllabus.pdf",
+  "semester_start_date": "2026-01-12",
+  "task_count": 5,
+  "tasks": [
+    {
+      "course_name": "STUB 101",
+      "task_name": "Problem Set 1",
+      "exact_due_date": "2026-01-30",
+      "grading_weight": "10%",
+      "task_description": "Stub task exercising the relative-week resolver.",
+      "raw_date_expression": "Week 3 Friday",
+      "requires_manual_review": false,
+      "review_reason": null,
+      "contradiction_detected": false,
+      "contradiction_quotes": [],
+      "source_page": 1,
+      "date_resolution_error": null,
+      "sync_dedupe_key": "c862cc31ee40bcc6ed3836a74da4a139"
+    },
+    {
+      "course_name": "STUB 101",
+      "task_name": "Midterm Exam",
+      "exact_due_date": "2026-10-13",
+      "grading_weight": "30%",
+      "task_description": "Stub task exercising the ordinal-weekday resolver.",
+      "raw_date_expression": "second Tuesday of October",
+      "requires_manual_review": false,
+      "review_reason": null,
+      "contradiction_detected": false,
+      "contradiction_quotes": [],
+      "source_page": 1,
+      "date_resolution_error": null,
+      "sync_dedupe_key": "aa1e816f4707d6ee6d31731edb0f9717"
+    },
+    {
+      "course_name": "STUB 101",
+      "task_name": "Final Project",
+      "exact_due_date": null,
+      "grading_weight": "40%",
+      "task_description": "Stub task exercising the unresolvable-date branch.",
+      "raw_date_expression": "TBD",
+      "requires_manual_review": true,
+      "review_reason": "unresolvable_date: 'TBD' — expression is a placeholder (TBD/TBA/varies) — no date stated",
+      "contradiction_detected": false,
+      "contradiction_quotes": [],
+      "source_page": 1,
+      "date_resolution_error": "expression is a placeholder (TBD/TBA/varies) — no date stated",
+      "sync_dedupe_key": null
+    },
+    {
+      "course_name": "STUB 101",
+      "task_name": "Lab Report 2",
+      "exact_due_date": "2026-10-10",
+      "grading_weight": "10%",
+      "task_description": "Stub task exercising the contradiction branch.",
+      "raw_date_expression": "Oct 10",
+      "requires_manual_review": true,
+      "review_reason": "contradiction_detected: source states conflicting dates (Lab Report 2 is due Oct 10. | Schedule table: Lab Report 2 — Oct 17)",
+      "contradiction_detected": true,
+      "contradiction_quotes": [
+        "Lab Report 2 is due Oct 10.",
+        "Schedule table: Lab Report 2 — Oct 17"
+      ],
+      "source_page": 1,
+      "date_resolution_error": null,
+      "sync_dedupe_key": "8b74742f25bb3b1c484174a4d009364c"
+    },
+    {
+      "course_name": "STUB 101",
+      "task_name": "Participation",
+      "exact_due_date": "2026-04-17",
+      "grading_weight": null,
+      "task_description": "Stub task exercising the missing-field branch.",
+      "raw_date_expression": "Week 14 Friday",
+      "requires_manual_review": true,
+      "review_reason": "missing_required_fields: grading_weight",
+      "contradiction_detected": false,
+      "contradiction_quotes": [],
+      "source_page": 1,
+      "date_resolution_error": null,
+      "sync_dedupe_key": "2aa38ff9f916149f61b4dbe97b9f6560"
+    }
+  ]
+}

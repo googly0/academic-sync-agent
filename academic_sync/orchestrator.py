@@ -1,0 +1,337 @@
+"""The orchestrator: runs the five stages and owns the boundaries between them.
+
+It is the only module that imports from more than one stage. Every stage is
+reachable and testable without it.
+
+What it is responsible for:
+
+* running stages in order and converting each stage's failure into a clear,
+  actionable message
+* applying stage 3's verdict (a date, or an exception) to stage 4's model
+* partitioning validated tasks into *syncable* and *needs review*
+* writing ``extracted_tasks.json`` and ``needs_review.json``
+* handing only syncable tasks to stage 5 (or nothing at all, on a dry run)
+
+What it is deliberately *not* responsible for: knowing how PDFs are parsed,
+which LLM is in use, how dates are computed, or how Google Calendar retries.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+from .config import PipelineConfig
+from .extraction.llm import LLMExtractionError, create_extractor
+from .extraction.pdf_extractor import PDFExtractionError, PDFTextExtractor
+from .models.task import AcademicTask, RawExtractedTask
+from .resolution import DateResolver, UnresolvableDateError
+
+logger = logging.getLogger(__name__)
+
+
+class PipelineError(RuntimeError):
+    """A stage failed in a way that stops the whole run."""
+
+
+@dataclass
+class PipelineResult:
+    """Everything the CLI needs to report and to choose an exit code."""
+
+    all_tasks: List[AcademicTask] = field(default_factory=list)
+    syncable: List[AcademicTask] = field(default_factory=list)
+    needs_review: List[AcademicTask] = field(default_factory=list)
+    ocr_pages: List[int] = field(default_factory=list)
+    dry_run: bool = False
+    sync_report: Optional[object] = None  # calendar_sync.SyncReport, lazily typed
+
+    @property
+    def interrupted(self) -> bool:
+        return bool(getattr(self.sync_report, "interrupted", False))
+
+
+def run_pipeline(config: PipelineConfig) -> PipelineResult:
+    """Execute the full pipeline for one syllabus."""
+    logger.info("=" * 70)
+    logger.info("Syllabus:       %s", config.pdf_path)
+    logger.info("Semester start: %s", config.semester_start_date.isoformat())
+    logger.info("LLM backend:    %s", config.llm_backend)
+    logger.info("Mode:           %s", "DRY RUN (no calendar writes)" if config.dry_run else "LIVE")
+    logger.info("=" * 70)
+
+    document = _stage_1_extract_text(config)
+    raw_tasks = _stage_2_extract_facts(config, document)
+    tasks = _stage_3_and_4_resolve_and_validate(config, raw_tasks)
+
+    syncable = [t for t in tasks if t.is_syncable]
+    needs_review = [t for t in tasks if t.requires_manual_review]
+
+    result = PipelineResult(
+        all_tasks=tasks,
+        syncable=syncable,
+        needs_review=needs_review,
+        ocr_pages=document.ocr_page_numbers,
+        dry_run=config.dry_run,
+    )
+
+    _write_outputs(config, result)
+
+    logger.info(
+        "validation gate: %d syncable, %d flagged for manual review",
+        len(syncable),
+        len(needs_review),
+    )
+
+    if config.dry_run:
+        logger.info("dry run: skipping Google Calendar entirely")
+        _log_dry_run_plan(syncable)
+        return result
+
+    result.sync_report = _stage_5_sync(config, syncable)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 1
+# ---------------------------------------------------------------------------
+
+
+def _stage_1_extract_text(config: PipelineConfig):
+    logger.info("[1/5] extracting text from PDF")
+    extractor = PDFTextExtractor(
+        min_chars_per_page=config.min_chars_per_page,
+        ocr_enabled=config.ocr_enabled,
+        ocr_dpi=config.ocr_dpi,
+        ocr_language=config.ocr_language,
+        poppler_path=config.poppler_path,
+        on_ocr_error=config.on_ocr_error,
+    )
+    try:
+        document = extractor.extract(config.pdf_path)
+    except PDFExtractionError as exc:
+        raise PipelineError(f"stage 1 (PDF extraction) failed: {exc}") from exc
+
+    logger.info(
+        "[1/5] %d page(s); %d via OCR%s",
+        len(document.pages),
+        len(document.ocr_page_numbers),
+        f" (pages {document.ocr_page_numbers})" if document.ocr_page_numbers else "",
+    )
+    if document.empty_page_numbers:
+        # Not fatal, but the user should know a page contributed nothing —
+        # a missing deadline may be hiding there.
+        logger.warning(
+            "no text recovered from page(s) %s; deadlines on them will be missed",
+            document.empty_page_numbers,
+        )
+    return document
+
+
+# ---------------------------------------------------------------------------
+# Stage 2
+# ---------------------------------------------------------------------------
+
+
+def _stage_2_extract_facts(config: PipelineConfig, document) -> List[RawExtractedTask]:
+    logger.info("[2/5] semantic extraction via %r", config.llm_backend)
+    try:
+        extractor = create_extractor(
+            config.llm_backend,
+            model=config.llm_model,
+            effort=config.llm_effort,
+            max_chunk_chars=config.max_chunk_chars,
+        )
+    except (ValueError, LLMExtractionError) as exc:
+        # An unknown backend name, a missing SDK, or an unusable credential —
+        # all user-fixable configuration problems, so report them as a clean
+        # message rather than a traceback.
+        raise PipelineError(f"stage 2 (backend setup) failed: {exc}") from exc
+
+    try:
+        raw_tasks = extractor.extract(
+            document.pages,
+            source_name=config.pdf_path.name,
+            course_hint=config.course_hint,
+        )
+    except LLMExtractionError as exc:
+        # Fatal on purpose. "The model call failed" must never be reported as
+        # "this syllabus has no deadlines".
+        raise PipelineError(f"stage 2 (semantic extraction) failed: {exc}") from exc
+
+    logger.info("[2/5] %d task(s) extracted", len(raw_tasks))
+    if not raw_tasks:
+        logger.warning(
+            "the model found no graded tasks — check that the PDF is a syllabus "
+            "and that OCR produced readable text (--verbose shows the extracted text volume)"
+        )
+    return raw_tasks
+
+
+# ---------------------------------------------------------------------------
+# Stages 3 + 4 (resolution feeds directly into validation)
+# ---------------------------------------------------------------------------
+
+
+def _stage_3_and_4_resolve_and_validate(
+    config: PipelineConfig, raw_tasks: Sequence[RawExtractedTask]
+) -> List[AcademicTask]:
+    logger.info("[3/5] resolving dates (deterministic, no LLM)")
+    resolver = DateResolver(
+        config.semester_start_date,
+        week_start_weekday=config.week_start_weekday,
+        grace_days_before=config.grace_days_before,
+        max_horizon_days=config.max_horizon_days,
+        day_first=config.day_first_dates,
+    )
+
+    tasks: List[AcademicTask] = []
+    resolved_count = 0
+
+    for raw in raw_tasks:
+        exact_date, error = _resolve_one(resolver, raw)
+        if exact_date is not None:
+            resolved_count += 1
+        # Construction runs the validator, which computes the review flags.
+        tasks.append(
+            AcademicTask.from_raw(raw, exact_due_date=exact_date, date_resolution_error=error)
+        )
+
+    logger.info(
+        "[3/5] %d/%d date expression(s) resolved to an absolute date",
+        resolved_count,
+        len(raw_tasks),
+    )
+    logger.info("[4/5] validating and flagging")
+    return tasks
+
+
+def _resolve_one(
+    resolver: DateResolver, raw: RawExtractedTask
+) -> Tuple[Optional[date], Optional[str]]:
+    """Resolve one expression into ``(date, None)`` or ``(None, reason)``.
+
+    The unresolvable path is a normal, expected outcome — not an error to be
+    swallowed. The reason string travels into ``needs_review.json`` so a human
+    can see exactly why the phrase defeated the resolver.
+    """
+    if not (raw.raw_date_expression or "").strip():
+        return None, "the syllabus states no due date for this task"
+    try:
+        return resolver.resolve(raw.raw_date_expression), None
+    except UnresolvableDateError as exc:
+        logger.info(
+            "unresolved: %r (%s / %s) — %s",
+            raw.raw_date_expression,
+            raw.course_name,
+            raw.task_name,
+            exc.reason,
+        )
+        return None, exc.reason
+
+
+# ---------------------------------------------------------------------------
+# Stage 5
+# ---------------------------------------------------------------------------
+
+
+def _stage_5_sync(config: PipelineConfig, syncable: Sequence[AcademicTask]):
+    """Authenticate and sync. Imported lazily so dry runs need no Google libs."""
+    logger.info("[5/5] syncing %d task(s) to calendar %s", len(syncable), config.calendar_id)
+
+    from .calendar_sync.auth import build_calendar_service
+    from .calendar_sync.errors import CalendarAuthError
+    from .calendar_sync.google_calendar import CalendarSyncer
+    from .calendar_sync.state import StateFileError, SyncState
+
+    try:
+        state = SyncState.load(config.state_path)
+    except StateFileError as exc:
+        raise PipelineError(str(exc)) from exc
+
+    try:
+        service = build_calendar_service(
+            credentials_path=config.credentials_path,
+            token_path=config.token_path,
+            allow_interactive=config.allow_interactive_auth,
+        )
+    except CalendarAuthError as exc:
+        raise PipelineError(f"stage 5 (authentication) failed: {exc}") from exc
+
+    syncer = CalendarSyncer(
+        service,
+        calendar_id=config.calendar_id,
+        state=state,
+        reminder_minutes=config.reminder_minutes,
+        max_attempts=config.max_sync_attempts,
+    )
+    report = syncer.sync_tasks(syncable)
+    logger.info("[5/5] %s", report.summary())
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Output artefacts
+# ---------------------------------------------------------------------------
+
+
+def _write_outputs(config: PipelineConfig, result: PipelineResult) -> None:
+    """Write ``extracted_tasks.json`` and ``needs_review.json``.
+
+    The review file is written on every run — including when it is empty — so
+    a stale file from a previous run can never be mistaken for the current one.
+    """
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_json(
+        config.extracted_tasks_path,
+        {
+            "source_pdf": str(config.pdf_path),
+            "semester_start_date": config.semester_start_date.isoformat(),
+            "task_count": len(result.all_tasks),
+            "tasks": [t.model_dump(mode="json") for t in result.all_tasks],
+        },
+    )
+
+    _write_json(
+        config.needs_review_path,
+        {
+            "source_pdf": str(config.pdf_path),
+            "semester_start_date": config.semester_start_date.isoformat(),
+            "review_count": len(result.needs_review),
+            "note": (
+                "These tasks were NOT synced to any calendar. Each has a "
+                "review_reason explaining which gate it failed: missing required "
+                "fields, a contradiction in the source text, or a date expression "
+                "that could not be resolved."
+            ),
+            "tasks": [t.model_dump(mode="json") for t in result.needs_review],
+        },
+    )
+
+    logger.info("wrote %s", config.extracted_tasks_path)
+    logger.info("wrote %s (%d task(s))", config.needs_review_path, len(result.needs_review))
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _log_dry_run_plan(syncable: Sequence[AcademicTask]) -> None:
+    """Show exactly what a live run would create."""
+    if not syncable:
+        logger.info("dry run: nothing would be synced")
+        return
+    logger.info("dry run: %d event(s) would be created:", len(syncable))
+    for task in sorted(syncable, key=lambda t: t.exact_due_date or date.max):
+        logger.info(
+            "  %s  [%s] %s  (weight: %s, from %r)",
+            task.exact_due_date.isoformat() if task.exact_due_date else "????-??-??",
+            task.course_name,
+            task.task_name,
+            task.grading_weight,
+            task.raw_date_expression,
+        )
