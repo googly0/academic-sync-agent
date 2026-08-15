@@ -52,11 +52,30 @@ class TestReviewBranches:
         assert "grading_weight" in task.review_reason
         assert task.is_syncable is False
 
-    def test_blank_string_counts_as_missing(self):
+    def test_blank_string_counts_as_missing_for_a_required_field(self):
+        task = AcademicTask.from_raw(
+            _complete_raw(course_name="   "), exact_due_date=date(2026, 2, 13)
+        )
+        assert REVIEW_MISSING_FIELDS in task.review_reason
+        assert "course_name" in task.review_reason
+
+    def test_missing_description_does_not_block_sync(self):
+        """A terse syllabus line ("Problem Set 1 (10%) due Week 3 Friday") has
+        no separate description sentence at all. That's normal, not a
+        data-quality problem — course, task name, weight, and a resolved
+        date are what actually make a calendar entry trustworthy."""
+        task = AcademicTask.from_raw(
+            _complete_raw(task_description=None), exact_due_date=date(2026, 2, 13)
+        )
+        assert task.requires_manual_review is False
+        assert task.review_reason is None
+        assert task.is_syncable is True
+
+    def test_blank_description_does_not_block_sync(self):
         task = AcademicTask.from_raw(
             _complete_raw(task_description="   "), exact_due_date=date(2026, 2, 13)
         )
-        assert REVIEW_MISSING_FIELDS in task.review_reason
+        assert task.is_syncable is True
 
     def test_contradiction(self):
         raw = _complete_raw(

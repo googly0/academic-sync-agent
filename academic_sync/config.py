@@ -49,7 +49,11 @@ class PipelineConfig:
     llm_backend: str = "anthropic"
     llm_model: Optional[str] = None
     llm_effort: Optional[str] = None
-    max_chunk_chars: int = 60_000
+    #: None defers to each backend's own default (see registry.py). Only a
+    #: user-supplied --chunk-chars should ever set this to a concrete value —
+    #: a hardcoded default here would silently override, e.g., Ollama's
+    #: smaller default sized for a local context window.
+    max_chunk_chars: Optional[int] = None
     course_hint: Optional[str] = None
 
     # --- Stage 3: date resolution ----------------------------------------

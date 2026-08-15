@@ -44,7 +44,15 @@ REVIEW_UNRESOLVED_DATE = "unresolvable_date"
 #: Fields that must be present for a task to be safe to put on someone's
 #: calendar. ``exact_due_date`` is handled separately (it has its own, more
 #: specific review code) so it is not listed here.
-REQUIRED_FOR_SYNC = ("course_name", "task_name", "grading_weight", "task_description")
+#:
+#: ``task_description`` is deliberately absent. Many real syllabi state a
+#: deadline in one terse line with no separate description sentence — e.g.
+#: "Problem Set 1 (10%) due Week 3 Friday" — and blocking sync on that would
+#: flag most ordinary tasks for a reason that isn't actually a data-quality
+#: problem. A missing description is a worse calendar entry, not an unsafe
+#: one; a wrong course, task name, weight, or date is what actually
+#: justifies routing to a human.
+REQUIRED_FOR_SYNC = ("course_name", "task_name", "grading_weight")
 
 
 def _normalise_for_key(value: str) -> str:

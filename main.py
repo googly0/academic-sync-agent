@@ -113,8 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     llm.add_argument(
         "--chunk-chars",
         type=int,
-        default=60_000,
-        help="Soft max characters per model call (default: 60000).",
+        default=None,
+        help=(
+            "Soft max characters per model call. Each backend picks its own "
+            "default when omitted (60000 for Anthropic; 6000 for Ollama, sized "
+            "to fit a typical local context window) — only set this to override it."
+        ),
     )
     llm.add_argument(
         "--course",
