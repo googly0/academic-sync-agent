@@ -24,6 +24,11 @@ google-auth>=2.30,<3.0
 google-auth-oauthlib>=1.2,<2.0
 google-auth-httplib2>=0.2,<1.0
 
+# --- Web UI (optional; the CLI never imports these) ------------------------
+fastapi>=0.110,<1.0         # local web interface
+uvicorn>=0.29,<1.0          # ASGI server for the web interface
+python-multipart>=0.0.9,<1.0  # multipart parsing for PDF upload
+
 # --- Misc ------------------------------------------------------------------
 python-dotenv>=1.0,<2.0     # loads ANTHROPIC_API_KEY etc. from .env
 

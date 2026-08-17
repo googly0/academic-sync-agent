@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import PipelineConfig
 from .extraction.llm import LLMExtractionError, create_extractor
@@ -38,6 +40,16 @@ class PipelineError(RuntimeError):
     """A stage failed in a way that stops the whole run."""
 
 
+#: Stage identifiers, in execution order. Shared by the CLI and the web UI so
+#: both describe the pipeline with the same vocabulary.
+STAGES = ("extract_text", "extract_facts", "resolve_dates", "validate", "sync")
+
+#: A callback invoked as each stage starts and finishes. Purely observational —
+#: the pipeline's behaviour does not depend on it, and a callback that raises
+#: must never take the run down with it (see ``_Progress.emit``).
+ProgressCallback = Callable[[str, str, str], None]  # (stage, state, message)
+
+
 @dataclass
 class PipelineResult:
     """Everything the CLI needs to report and to choose an exit code."""
@@ -48,14 +60,59 @@ class PipelineResult:
     ocr_pages: List[int] = field(default_factory=list)
     dry_run: bool = False
     sync_report: Optional[object] = None  # calendar_sync.SyncReport, lazily typed
+    #: Wall-clock seconds per stage. Useful for the UI, and for noticing that
+    #: stage 2 dominates the run (it does — everything else is milliseconds).
+    stage_timings: Dict[str, float] = field(default_factory=dict)
 
     @property
     def interrupted(self) -> bool:
         return bool(getattr(self.sync_report, "interrupted", False))
 
 
-def run_pipeline(config: PipelineConfig) -> PipelineResult:
-    """Execute the full pipeline for one syllabus."""
+class _Progress:
+    """Times each stage and forwards state changes to an optional callback.
+
+    Deliberately defensive: this exists to *report* on the pipeline, so a
+    broken reporter (a closed websocket, a UI that went away) must not be able
+    to fail a run that is otherwise succeeding.
+    """
+
+    def __init__(self, callback: Optional[ProgressCallback], timings: Dict[str, float]) -> None:
+        self._callback = callback
+        self._timings = timings
+
+    def emit(self, stage: str, state: str, message: str = "") -> None:
+        if self._callback is None:
+            return
+        try:
+            self._callback(stage, state, message)
+        except Exception:  # pragma: no cover - a reporter must never break a run
+            logger.debug("progress callback raised; continuing", exc_info=True)
+
+    @contextmanager
+    def stage(self, stage: str, message: str = ""):
+        self.emit(stage, "running", message)
+        started = time.monotonic()
+        try:
+            yield
+        except BaseException:
+            self._timings[stage] = time.monotonic() - started
+            self.emit(stage, "failed", "")
+            raise
+        self._timings[stage] = time.monotonic() - started
+
+
+def run_pipeline(
+    config: PipelineConfig, *, progress: Optional[ProgressCallback] = None
+) -> PipelineResult:
+    """Execute the full pipeline for one syllabus.
+
+    Args:
+        config: the run's configuration.
+        progress: optional observer called as ``(stage, state, message)`` when
+            each stage starts and finishes. Used by the web UI to show live
+            progress; the CLI leaves it unset and nothing changes.
+    """
     logger.info("=" * 70)
     logger.info("Syllabus:       %s", config.pdf_path)
     logger.info("Semester start: %s", config.semester_start_date.isoformat())
@@ -63,22 +120,36 @@ def run_pipeline(config: PipelineConfig) -> PipelineResult:
     logger.info("Mode:           %s", "DRY RUN (no calendar writes)" if config.dry_run else "LIVE")
     logger.info("=" * 70)
 
-    document = _stage_1_extract_text(config)
-    raw_tasks = _stage_2_extract_facts(config, document)
-    tasks = _stage_3_and_4_resolve_and_validate(config, raw_tasks)
+    timings: Dict[str, float] = {}
+    tracker = _Progress(progress, timings)
 
-    syncable = [t for t in tasks if t.is_syncable]
-    needs_review = [t for t in tasks if t.requires_manual_review]
+    with tracker.stage("extract_text", "reading the PDF"):
+        document = _stage_1_extract_text(config)
+    tracker.emit("extract_text", "done", f"{len(document.pages)} page(s)")
 
-    result = PipelineResult(
-        all_tasks=tasks,
-        syncable=syncable,
-        needs_review=needs_review,
-        ocr_pages=document.ocr_page_numbers,
-        dry_run=config.dry_run,
-    )
+    with tracker.stage("extract_facts", f"querying {config.llm_backend}"):
+        raw_tasks = _stage_2_extract_facts(config, document)
+    tracker.emit("extract_facts", "done", f"{len(raw_tasks)} task(s) found")
 
-    _write_outputs(config, result)
+    with tracker.stage("resolve_dates", "resolving dates deterministically"):
+        tasks = _stage_3_and_4_resolve_and_validate(config, raw_tasks)
+    resolved = sum(1 for t in tasks if t.exact_due_date is not None)
+    tracker.emit("resolve_dates", "done", f"{resolved}/{len(tasks)} resolved")
+
+    with tracker.stage("validate", "applying the review gate"):
+        syncable = [t for t in tasks if t.is_syncable]
+        needs_review = [t for t in tasks if t.requires_manual_review]
+
+        result = PipelineResult(
+            all_tasks=tasks,
+            syncable=syncable,
+            needs_review=needs_review,
+            ocr_pages=document.ocr_page_numbers,
+            dry_run=config.dry_run,
+            stage_timings=timings,
+        )
+        _write_outputs(config, result)
+    tracker.emit("validate", "done", f"{len(syncable)} pass, {len(needs_review)} flagged")
 
     logger.info(
         "validation gate: %d syncable, %d flagged for manual review",
@@ -89,9 +160,12 @@ def run_pipeline(config: PipelineConfig) -> PipelineResult:
     if config.dry_run:
         logger.info("dry run: skipping Google Calendar entirely")
         _log_dry_run_plan(syncable)
+        tracker.emit("sync", "skipped", "dry run — calendar untouched")
         return result
 
-    result.sync_report = _stage_5_sync(config, syncable)
+    with tracker.stage("sync", f"syncing to {config.calendar_id}"):
+        result.sync_report = _stage_5_sync(config, syncable)
+    tracker.emit("sync", "done", result.sync_report.summary())
     return result
 
 
