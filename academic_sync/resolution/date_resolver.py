@@ -569,13 +569,21 @@ def _nth_weekday_of_month(year: int, month: int, n: int, weekday: int, label: st
     exist — "fifth Monday of October 2026" has only four, and inventing one in
     November would be exactly the kind of silent guess this module forbids.
     """
-    days_in_month = _calendar.monthrange(year, month)[1]
+    # Guard the calendar lookups the same way ``_build_date`` guards its own:
+    # an OCR-damaged year ("last Friday of November 0000") otherwise escapes as
+    # a bare ValueError and kills the whole run, instead of flagging one task.
+    # Nothing inside this block raises UnresolvableDateError, which is itself a
+    # ValueError and must not be caught and relabelled here.
+    try:
+        days_in_month = _calendar.monthrange(year, month)[1]
+        first = date(year, month, 1)
+    except ValueError as exc:
+        raise UnresolvableDateError(label, f"not a valid calendar date ({exc})") from exc
 
     if n == -1:
         last = date(year, month, days_in_month)
         return last - timedelta(days=(last.weekday() - weekday) % 7)
 
-    first = date(year, month, 1)
     day_of_month = 1 + ((weekday - first.weekday()) % 7) + (n - 1) * 7
     if day_of_month > days_in_month:
         raise UnresolvableDateError(

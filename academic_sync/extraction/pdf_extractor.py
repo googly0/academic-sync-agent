@@ -158,13 +158,19 @@ class PDFTextExtractor:
 
             logger.info("page %d looks scanned (%d chars); running OCR", page_number, len(cleaned))
             ocr_text = self._ocr_page(path, page_number)
-            if ocr_text is None:
+            recovered = _tidy(ocr_text) if ocr_text is not None else ""
+            if not recovered:
+                # OCR either was unavailable (``None``) or ran and recovered
+                # nothing. Both mean the page contributed no text, so it must
+                # be recorded as "empty": labelling it "ocr" would report a
+                # success and hide the page from the empty-page warning, which
+                # is the only signal that deadlines may be missing.
                 document.pages.append(
                     PageText(page_number=page_number, text=cleaned, source="empty")
                 )
             else:
                 document.pages.append(
-                    PageText(page_number=page_number, text=_tidy(ocr_text), source="ocr")
+                    PageText(page_number=page_number, text=recovered, source="ocr")
                 )
 
         if not any(p.text.strip() for p in document.pages):

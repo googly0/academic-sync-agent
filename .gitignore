@@ -6,8 +6,17 @@
 .env
 *.pem
 
+# `.env` alone does not match .env.local / .env.production
+.env.*
+!.env.example
+
 # Google OAuth client secrets
 credentials.json
+
+# Google Cloud Console downloads the same file as
+# client_secret_<id>.apps.googleusercontent.com.json. The README says to rename
+# it, but the un-renamed copy is a live credential and must not depend on that.
+client_secret*.json
 
 # Cached OAuth token — this is a live credential
 token.json

@@ -153,6 +153,20 @@ class TestOrdinalWeekdayPatterns:
             resolver.resolve("fifth Monday of October")
         assert "no 5th occurrence" in exc.value.reason
 
+    def test_impossible_explicit_year_is_flagged_not_crashed(self, resolver):
+        """OCR turns years into rubbish, and "November 0000" is not a date.
+
+        The month/day family already converts calendar errors into our own
+        error type; the ordinal family must too. If a bare ValueError escapes
+        stage 3, the orchestrator's ``except UnresolvableDateError`` misses it
+        and one damaged line aborts the entire syllabus instead of being
+        flagged for review.
+        """
+        for expression in ("last Friday of November 0000", "second Tuesday of October 0000"):
+            with pytest.raises(UnresolvableDateError) as exc:
+                resolver.resolve(expression)
+            assert "not a valid calendar date" in exc.value.reason
+
     def test_explicit_year_is_respected(self):
         # Semester starting Sept 2026; "first Friday of February 2027".
         fall = DateResolver(date(2026, 9, 1))

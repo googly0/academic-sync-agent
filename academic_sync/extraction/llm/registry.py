@@ -34,8 +34,13 @@ def _ollama_factory(**kwargs: Any) -> LLMExtractor:
 def _stub_factory(**kwargs: Any) -> LLMExtractor:
     from .stub_extractor import StubExtractor
 
-    # The stub ignores every model-ish option by design.
-    return StubExtractor(max_chunk_chars=kwargs.get("max_chunk_chars", 60_000))
+    # The stub ignores every model-ish option by design. max_chunk_chars is
+    # forwarded only when the caller actually supplied it — repeating a literal
+    # default here is the same defect --chunk-chars had: a second copy of a
+    # default that silently wins over the backend's own.
+    if "max_chunk_chars" in kwargs:
+        return StubExtractor(max_chunk_chars=kwargs["max_chunk_chars"])
+    return StubExtractor()
 
 
 _REGISTRY: Dict[str, Callable[..., LLMExtractor]] = {
