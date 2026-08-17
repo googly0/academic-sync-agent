@@ -101,3 +101,39 @@ class TestUserPrompt:
             page_range=(1, 1),
         )
         assert "<syllabus>" in prompt and "</syllabus>" in prompt
+
+
+class TestTaskBoundary:
+    """Guards for what counts as a task.
+
+    A real B.Tech semester calendar produced six spurious "tasks": four course
+    listings from a curriculum table (CS511: DBMS Lab, CS514: Mini-Project I,
+    ...) and one grading-policy sentence returned as a task_name. The cause was
+    this prompt's own opening line, which asked for "every ... lab" — the model
+    followed the instruction correctly.
+    """
+
+    def test_does_not_ask_for_bare_labs(self):
+        """"lab" alone matches a lab *course*; only a lab report is a
+        deliverable with a deadline."""
+        assert "and lab that" not in EXTRACTION_SYSTEM_PROMPT
+        assert "lab report" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_excludes_course_listings(self):
+        assert "Course listings" in EXTRACTION_SYSTEM_PROMPT
+        # Named concretely, using the real examples that leaked through.
+        assert "CS511" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_excludes_grading_policy_prose(self):
+        assert "Policy and grading-scheme sentences" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_requires_task_name_to_be_a_noun_phrase(self):
+        """The observed failure returned a whole sentence as a task_name."""
+        assert "short noun phrase" in EXTRACTION_SYSTEM_PROMPT
+        assert "full sentence" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_handles_whole_programme_documents(self):
+        """An academic calendar spans a programme, not one course; the model
+        was repeating an unrelated nearby course code instead."""
+        assert "programme name" in EXTRACTION_SYSTEM_PROMPT
+        assert "Never borrow a course code" in EXTRACTION_SYSTEM_PROMPT

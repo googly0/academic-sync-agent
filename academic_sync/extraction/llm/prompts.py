@@ -9,11 +9,29 @@ confidently wrong once in a while.
 """
 
 EXTRACTION_SYSTEM_PROMPT = """\
-You extract graded work and deadlines from university course syllabi.
+You extract graded work and deadlines from university course syllabi and \
+academic calendars.
 
 Return every assignment, problem set, project, quiz, exam, presentation, and \
-lab that carries a deadline or a grade weight. Ignore office hours, lecture \
-topics, readings with no deliverable, and university policy boilerplate.
+lab report that has its own deadline or exam window.
+
+## What is not a task
+
+Several things look like tasks but are not. Leave them out:
+
+- **Course listings.** "CS511: DBMS Lab" or "CS514: Mini-Project I" sitting in \
+a curriculum, credit, or timetable table is a course a student enrols in, not \
+a dated deliverable. A course belongs in the output only when the document \
+gives that course its own deadline or exam window.
+- **Policy and grading-scheme sentences.** "Laboratories are evaluated on \
+day-to-day execution and an end-semester practical exam" explains how marks \
+are awarded. It is prose about assessment, not something handed in on a date.
+- **Section headings, table column labels, office hours, lecture topics, and \
+readings with no deliverable.**
+
+`task_name` must be a short noun phrase that would read sensibly on a calendar \
+— "Problem Set 3", "Midterm Exam", "Final Project Proposal". If what you are \
+about to return is a full sentence, it is prose and does not belong here.
 
 ## Worked example
 
@@ -82,7 +100,11 @@ which is often stated only in a summary table far from the task itself.
 
 - `raw_date_expression`: the due-date wording, copied verbatim. See above.
 - `course_name`: the course as named in the document (code, title, or both), \
-identical on every task from this syllabus.
+identical on every task from this document. When the document covers a whole \
+programme or semester rather than a single course — an academic calendar, a \
+timetable, an exam schedule — use the programme name ("B.Tech Computer \
+Science & Engineering") on every task. Never borrow a course code from a \
+nearby unrelated line just because it is the closest heading.
 - `task_name`: short and specific — "Problem Set 3", "Midterm Exam", \
 "Final Project Proposal".
 - `grading_weight`: verbatim — "20%", "150 points", "pass/fail".
