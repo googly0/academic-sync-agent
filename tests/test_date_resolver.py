@@ -399,3 +399,79 @@ class TestPublicAPI:
         first = [resolver.resolve("Week 5 Friday"), resolver.resolve("Oct 10")]
         second = [resolver.resolve("Oct 10"), resolver.resolve("Week 5 Friday")]
         assert first == list(reversed(second))
+
+
+# ---------------------------------------------------------------------------
+# Multi-day spans
+#
+# Added after running a real B.Tech semester calendar through the pipeline:
+# every exam period ("Sept 24 - Sept 30, 2026") was refused as ambiguous, but
+# an exam *window* is a genuine multi-day event, not an unclear deadline.
+# ---------------------------------------------------------------------------
+
+
+class TestDateSpans:
+    @pytest.mark.parametrize(
+        "expression,start,end",
+        [
+            # The four periods from the real syllabus that motivated this.
+            ("Sept 24 - Sept 30, 2026", date(2026, 9, 24), date(2026, 9, 30)),
+            ("Nov 23 - Nov 28, 2026", date(2026, 11, 23), date(2026, 11, 28)),
+            ("Dec 9 - Dec 23, 2026", date(2026, 12, 9), date(2026, 12, 23)),
+            # Crosses a month boundary.
+            ("Nov 30 - Dec 7, 2026", date(2026, 11, 30), date(2026, 12, 7)),
+            # Shorthand: the closing day inherits the opening month.
+            ("Oct 10-12", date(2026, 10, 10), date(2026, 10, 12)),
+            ("Oct 10 to 12", date(2026, 10, 10), date(2026, 10, 12)),
+            ("Oct 10 through 12", date(2026, 10, 10), date(2026, 10, 12)),
+            # Both sides fully specified.
+            ("Oct 10 - Oct 17", date(2026, 10, 10), date(2026, 10, 17)),
+        ],
+    )
+    def test_ranges_resolve_to_spans(self, resolver, expression, start, end):
+        span = resolver.resolve_span(expression)
+        assert span.is_range is True
+        assert (span.start, span.end) == (start, end)
+
+    def test_span_reports_inclusive_length(self, resolver):
+        # Dec 9 through Dec 23 inclusive is 15 days, not 14.
+        assert resolver.resolve_span("Dec 9 - Dec 23, 2026").days == 15
+
+    def test_single_date_is_a_span_of_one(self, resolver):
+        span = resolver.resolve_span("Oct 10")
+        assert span.is_range is False
+        assert span.end is None
+        assert span.days == 1
+
+    def test_a_real_contradiction_is_still_refused(self, resolver):
+        """The separator is what distinguishes a span from a contradiction:
+        "Oct 10 - Oct 17" is a period, "Oct 10 or Oct 17" is the syllabus
+        disagreeing with itself and must still reach a human."""
+        for expression in ("Oct 10 or Oct 17", "Oct 10 and Oct 17"):
+            with pytest.raises(AmbiguousDateError) as exc:
+                resolver.resolve_span(expression)
+            assert "conflicting dates" in exc.value.reason
+
+    def test_resolve_stays_strict_about_ranges(self, resolver):
+        """``resolve`` promises a single day, so a span is still an error
+        there — the range-aware callers use ``resolve_span``."""
+        with pytest.raises(AmbiguousDateError) as exc:
+            resolver.resolve("Dec 9 - Dec 23, 2026")
+        assert "range" in exc.value.reason
+
+    def test_backwards_range_is_refused(self, resolver):
+        with pytest.raises(AmbiguousDateError) as exc:
+            resolver.resolve_span("Oct 17 - Oct 10")
+        assert "ends before it starts" in exc.value.reason
+
+    def test_impossible_closing_day_does_not_invent_one(self, resolver):
+        """"Feb 27-30" has no 30th. Silently rolling into March would be
+        exactly the guess this module refuses."""
+        with pytest.raises(UnresolvableDateError):
+            resolver.resolve_span("Feb 27-30")
+
+    def test_both_ends_are_range_checked(self, resolver):
+        """A span whose far end lands outside the plausibility window is OCR
+        damage, the same as a single date would be."""
+        with pytest.raises(DateOutOfRangeError):
+            resolver.resolve_span("Oct 10, 2026 - Oct 10, 2099")

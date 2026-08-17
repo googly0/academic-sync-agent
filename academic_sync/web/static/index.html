@@ -175,6 +175,17 @@
     font-size: 10px; text-transform: uppercase;
     letter-spacing: .06em; color: var(--muted);
   }
+  .agenda.is-span { border-left-color: var(--accent); }
+  .cal.span { width: 62px; }
+  .cal.span .cal-day { font-size: 15px; }
+  .cal-sep { opacity: .5; margin: 0 1px; }
+  .badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+    background: var(--accent-dim); color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 20px;
+    padding: 1px 7px; margin-left: 7px; vertical-align: 1px;
+  }
+
   .agenda-body { flex: 1; min-width: 0; }
   .agenda-title { font-weight: 600; }
   .agenda-meta { color: var(--muted); font-size: 13px; margin-top: 1px; }
@@ -464,20 +475,31 @@ function schedule(tasks) {
 
 function agendaRow(t) {
   const day = Number(t.exact_due_date.split("-")[2]);
-  return `<div class="agenda">
-    <div class="cal">
-      <div class="cal-day">${day}</div>
-      <div class="cal-dow">${(t.weekday || "").slice(0, 3)}</div>
-    </div>
+  const endDay = t.end_date ? Number(t.end_date.split("-")[2]) : null;
+  // A multi-day period (exam window, revision week) shows both ends and its
+  // length, rather than pretending to be a single deadline.
+  const tile = t.end_date
+    ? `<div class="cal span">
+         <div class="cal-day">${day}<span class="cal-sep">–</span>${endDay}</div>
+         <div class="cal-dow">${t.span_days} days</div>
+       </div>`
+    : `<div class="cal">
+         <div class="cal-day">${day}</div>
+         <div class="cal-dow">${(t.weekday || "").slice(0, 3)}</div>
+       </div>`;
+  return `<div class="agenda${t.end_date ? " is-span" : ""}">
+    ${tile}
     <div class="agenda-body">
-      <div class="agenda-title">${esc(t.task_name || "Untitled")}</div>
+      <div class="agenda-title">${esc(t.task_name || "Untitled")}
+        ${t.end_date ? `<span class="badge">multi-day</span>` : ""}
+      </div>
       <div class="agenda-meta">
         ${esc(t.course_name || "")}${t.grading_weight ? ` &middot; ${esc(t.grading_weight)}` : ""}
       </div>
       ${t.raw_date_expression ? `<div class="agenda-src">
           <span class="quote">"${esc(t.raw_date_expression)}"</span>
           <span class="arrow">&rarr;</span>
-          <span class="out">${t.exact_due_date}</span>
+          <span class="out">${t.exact_due_date}${t.end_date ? " .. " + t.end_date : ""}</span>
         </div>` : ""}
     </div>
   </div>`;

@@ -152,8 +152,41 @@ RANGE_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Exactly a range marker and nothing else — used to tell "Oct 10 - Oct 17"
+#: (a span) apart from "Oct 10 or Oct 17" (a genuine contradiction).
+BETWEEN_RANGE_RE = re.compile(
+    r"^\s*(?:[-–—]|to|through|thru|until|til|till)\s*$", re.IGNORECASE
+)
+
 #: Any leftover standalone weekday, used for the consistency cross-check.
 LEFTOVER_WEEKDAY_RE = re.compile(rf"\b({_WD})s?\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class DateSpan:
+    """One resolved date, or a multi-day period.
+
+    ``end`` is ``None`` for an ordinary single-day deadline. When present it is
+    **inclusive** — "Dec 9 - Dec 23" spans both endpoints. (The Google Calendar
+    API wants an exclusive end date; that conversion happens at the calendar
+    boundary, not here.)
+    """
+
+    start: date
+    end: Optional[date] = None
+
+    @property
+    def is_range(self) -> bool:
+        return self.end is not None
+
+    @property
+    def days(self) -> int:
+        return 1 if self.end is None else (self.end - self.start).days + 1
+
+    def __str__(self) -> str:
+        if self.end is None:
+            return self.start.isoformat()
+        return f"{self.start.isoformat()}..{self.end.isoformat()}"
 
 
 @dataclass(frozen=True)
@@ -228,6 +261,30 @@ class DateResolver:
             DateOutOfRangeError: the expression parsed but landed outside the
                 plausibility window around the semester.
         """
+        span = self.resolve_span(raw_expression)
+        if span.is_range:
+            # Callers of ``resolve`` want one day. A span is genuinely
+            # ambiguous for a *deadline* ("due Oct 10-12" — which day?), so it
+            # is refused here; ``resolve_span`` is the range-aware entry point.
+            raise AmbiguousDateError(
+                raw_expression,
+                "expression describes a date range, not a single due date "
+                f"({span.start.isoformat()}..{span.end.isoformat()})",
+            )
+        return span.start
+
+    def resolve_span(self, raw_expression: Optional[str]) -> "DateSpan":
+        """Resolve to a single day *or* a multi-day span.
+
+        Exam periods, revision weeks, and holidays are legitimately multi-day
+        ("End Semester Examinations, Dec 9 - Dec 23"). Collapsing those to one
+        date would be a guess; refusing them outright loses a real event. So a
+        range resolves to a :class:`DateSpan` with both ends, and the caller
+        decides what that means.
+
+        Raises the same errors as :meth:`resolve`, except that a well-formed
+        range is a success here rather than an ``AmbiguousDateError``.
+        """
         original = raw_expression or ""
         if not original.strip():
             raise UnresolvableDateError(original, "expression is empty")
@@ -259,25 +316,34 @@ class DateResolver:
             )
 
         distinct = sorted({c.value for c in candidates})
-        if len(distinct) > 1:
-            rendered = ", ".join(d.isoformat() for d in distinct)
-            raise AmbiguousDateError(
-                original, f"expression yields multiple conflicting dates: {rendered}"
-            )
 
-        resolved = distinct[0]
+        if len(distinct) == 1:
+            start = distinct[0]
+            # "Oct 10-12": only the left side matches a date pattern, so the
+            # closing day arrives as a bare number the ladder cannot see.
+            end = self._range_tail_end(original, text, candidates, start)
+            if end is not None:
+                return self._finish_span(original, start, end)
 
-        # A range ("Oct 10-12") parses to a single leading date, which would
-        # otherwise sail through. Detect the trailing range marker explicitly.
-        self._reject_ranges(original, text, candidates)
+            self._check_weekday_agreement(original, residue, start)
+            self._check_window(original, start)
+            return DateSpan(start)
 
-        # Cross-check any weekday word the patterns did not consume. This is
-        # what catches the very common syllabus typo "Friday, Oct 10" where
-        # Oct 10 is actually a Saturday.
-        self._check_weekday_agreement(original, residue, resolved)
+        if len(distinct) == 2 and self._separated_by_range_marker(text, candidates):
+            # "Sept 24 - Sept 30, 2026" — two full dates joined by a range
+            # marker. Both sides parsed independently, so a span that crosses a
+            # month or a year boundary works without special-casing.
+            #
+            # Ordered by position in the text, NOT by value: sorting here would
+            # silently repair "Oct 17 - Oct 10" into a valid forward range
+            # instead of reporting that the source is backwards.
+            ordered = sorted(candidates, key=lambda c: c.span[0])
+            return self._finish_span(original, ordered[0].value, ordered[-1].value)
 
-        self._check_window(original, resolved)
-        return resolved
+        rendered = ", ".join(d.isoformat() for d in distinct)
+        raise AmbiguousDateError(
+            original, f"expression yields multiple conflicting dates: {rendered}"
+        )
 
     def resolve_iso(self, raw_expression: Optional[str]) -> str:
         """Convenience wrapper returning an ISO 8601 (``YYYY-MM-DD``) string."""
@@ -497,21 +563,68 @@ class DateResolver:
                 return candidate
         raise UnresolvableDateError(source, "could not place this date within the semester window")
 
-    def _reject_ranges(
-        self, original: str, text: str, candidates: Sequence[_Candidate]
-    ) -> None:
-        """Raise if a matched date is immediately followed by a range tail.
+    def _finish_span(self, original: str, start: date, end: date) -> "DateSpan":
+        """Validate both ends of a span and return it.
+
+        The weekday cross-check is deliberately skipped for spans: a leftover
+        weekday in "Mon Dec 9 - Fri Dec 23" belongs to one end or the other,
+        and guessing which would reintroduce exactly the ambiguity this module
+        refuses elsewhere.
+        """
+        if end < start:
+            raise AmbiguousDateError(
+                original,
+                f"range ends before it starts ({start.isoformat()}..{end.isoformat()})",
+            )
+        self._check_window(original, start)
+        self._check_window(original, end)
+        return DateSpan(start, end)
+
+    def _range_tail_end(
+        self, original: str, text: str, candidates: Sequence[_Candidate], start: date
+    ) -> Optional[date]:
+        """Closing day of a shorthand range like "Oct 10-12", or ``None`` when
+        there is no range tail at all.
+
+        The tail is a bare day number, so it inherits the month and year of the
+        date that opened the range.
 
         ``text`` and the candidate spans share an index space because masking
         replaces characters with spaces rather than deleting them.
         """
         for candidate in candidates:
-            tail = text[candidate.span[1] :]
-            if RANGE_SUFFIX_RE.match(tail):
-                raise AmbiguousDateError(
+            match = RANGE_SUFFIX_RE.match(text[candidate.span[1] :])
+            if not match:
+                continue
+            day = int(re.search(r"\d{1,2}", match.group(0)).group(0))
+            try:
+                return date(start.year, start.month, day)
+            except ValueError as exc:
+                # "Feb 27-30" — no such closing day. Raising is essential:
+                # returning None here would fall through to "single date" and
+                # silently discard half the expression, which is precisely the
+                # kind of quiet wrong answer this module exists to prevent.
+                raise UnresolvableDateError(
                     original,
-                    "expression describes a date range, not a single due date",
-                )
+                    f"range ends on a day that does not exist in "
+                    f"{_calendar.month_name[start.month]} {start.year} ({exc})",
+                ) from exc
+        return None
+
+    def _separated_by_range_marker(
+        self, text: str, candidates: Sequence[_Candidate]
+    ) -> bool:
+        """True when exactly a range marker sits between the two matches.
+
+        Requiring the gap to contain *only* a separator is what keeps
+        "Oct 10 or Oct 17" (genuinely conflicting) distinct from
+        "Oct 10 - Oct 17" (a span).
+        """
+        ordered = sorted(candidates, key=lambda c: c.span[0])
+        if len(ordered) < 2:
+            return False
+        gap = text[ordered[0].span[1] : ordered[1].span[0]]
+        return bool(BETWEEN_RANGE_RE.match(gap))
 
     def _check_weekday_agreement(self, original: str, residue: str, resolved: date) -> None:
         """Cross-check a leftover weekday word against the resolved date.

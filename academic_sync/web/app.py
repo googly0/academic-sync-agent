@@ -136,6 +136,13 @@ def _task_to_dict(task: AcademicTask) -> Dict[str, Any]:
         "task_name": task.task_name,
         "exact_due_date": task.exact_due_date.isoformat() if task.exact_due_date else None,
         "weekday": task.exact_due_date.strftime("%A") if task.exact_due_date else None,
+        "end_date": task.end_date.isoformat() if task.end_date else None,
+        "end_weekday": task.end_date.strftime("%A") if task.end_date else None,
+        "span_days": (
+            (task.end_date - task.exact_due_date).days + 1
+            if task.end_date and task.exact_due_date
+            else 1
+        ),
         "grading_weight": task.grading_weight,
         "task_description": task.task_description,
         "raw_date_expression": task.raw_date_expression,

@@ -45,12 +45,23 @@ class TestHappyPath:
 class TestReviewBranches:
     def test_missing_required_field(self):
         task = AcademicTask.from_raw(
-            _complete_raw(grading_weight=None), exact_due_date=date(2026, 2, 13)
+            _complete_raw(course_name=None), exact_due_date=date(2026, 2, 13)
         )
         assert task.requires_manual_review is True
         assert REVIEW_MISSING_FIELDS in task.review_reason
-        assert "grading_weight" in task.review_reason
+        assert "course_name" in task.review_reason
         assert task.is_syncable is False
+
+    def test_missing_weight_does_not_block_sync(self):
+        """An academic calendar — exam windows, submission dates, preparation
+        holidays — states no grading weights at all. Requiring one flagged
+        every task in a real B.Tech semester calendar for a reason that was
+        not a data-quality problem."""
+        task = AcademicTask.from_raw(
+            _complete_raw(grading_weight=None), exact_due_date=date(2026, 2, 13)
+        )
+        assert task.requires_manual_review is False
+        assert task.is_syncable is True
 
     def test_blank_string_counts_as_missing_for_a_required_field(self):
         task = AcademicTask.from_raw(
@@ -103,7 +114,7 @@ class TestReviewBranches:
 
     def test_all_three_reasons_are_reported_together(self):
         raw = _complete_raw(
-            grading_weight=None,
+            course_name=None,
             raw_date_expression="TBD",
             contradiction_detected=True,
             contradiction_quotes=["Oct 10", "Oct 17"],

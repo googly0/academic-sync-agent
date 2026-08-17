@@ -45,14 +45,20 @@ REVIEW_UNRESOLVED_DATE = "unresolvable_date"
 #: calendar. ``exact_due_date`` is handled separately (it has its own, more
 #: specific review code) so it is not listed here.
 #:
-#: ``task_description`` is deliberately absent. Many real syllabi state a
-#: deadline in one terse line with no separate description sentence — e.g.
-#: "Problem Set 1 (10%) due Week 3 Friday" — and blocking sync on that would
-#: flag most ordinary tasks for a reason that isn't actually a data-quality
-#: problem. A missing description is a worse calendar entry, not an unsafe
-#: one; a wrong course, task name, weight, or date is what actually
-#: justifies routing to a human.
-REQUIRED_FOR_SYNC = ("course_name", "task_name", "grading_weight")
+#: ``task_description`` and ``grading_weight`` are both deliberately absent.
+#:
+#: Many real documents state a deadline in one terse line with no separate
+#: description ("Problem Set 1 (10%) due Week 3 Friday"), and an academic
+#: calendar — exam windows, submission dates, preparation holidays — carries
+#: no grading weights at all, because that is not what that kind of document
+#: does. Requiring either one flagged every task in a real B.Tech semester
+#: calendar for a reason that was not a data-quality problem.
+#:
+#: What remains is the irreducible minimum for a *trustworthy* calendar entry:
+#: which course, which task, and (checked separately, with its own review
+#: code) which day. A missing weight makes a worse entry; a wrong date makes a
+#: harmful one.
+REQUIRED_FOR_SYNC = ("course_name", "task_name")
 
 
 def _normalise_for_key(value: str) -> str:
@@ -153,7 +159,12 @@ class AcademicTask(BaseModel):
     task_name: Optional[str] = None
     #: Absolute due date, ISO 8601 on serialisation. ``None`` means stage 3
     #: refused to guess — the task is flagged, never given a fabricated date.
+    #: For a multi-day period this is the first day.
     exact_due_date: Optional[date] = None
+    #: Last day of a multi-day period, **inclusive**; ``None`` for an ordinary
+    #: single-day deadline. Exam windows and revision weeks are genuinely
+    #: multi-day, and collapsing them to one date would be a guess.
+    end_date: Optional[date] = None
     grading_weight: Optional[str] = None
     task_description: Optional[str] = None
     #: Kept verbatim so a human reviewing needs_review.json can see exactly
@@ -230,13 +241,17 @@ class AcademicTask(BaseModel):
         """
         if self.exact_due_date is None or not self.course_name or not self.task_name:
             return None
-        payload = "|".join(
-            (
-                _normalise_for_key(self.course_name),
-                _normalise_for_key(self.task_name),
-                self.exact_due_date.isoformat(),
-            )
-        )
+        parts = [
+            _normalise_for_key(self.course_name),
+            _normalise_for_key(self.task_name),
+            self.exact_due_date.isoformat(),
+        ]
+        # Only appended when a span exists, so single-day keys are byte-identical
+        # to those written before multi-day support — an existing sync_state.json
+        # keeps matching instead of duplicating every event.
+        if self.end_date is not None:
+            parts.append(self.end_date.isoformat())
+        payload = "|".join(parts)
         # 32 hex chars is far more than enough for per-user syllabus volumes
         # and keeps the value inside Google's extended-property length limits.
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
@@ -246,12 +261,17 @@ class AcademicTask(BaseModel):
         """True only when the task passed every gate and has a dedupe key."""
         return not self.requires_manual_review and self.sync_dedupe_key is not None
 
+    @property
+    def is_multi_day(self) -> bool:
+        return self.end_date is not None
+
     @classmethod
     def from_raw(
         cls,
         raw: RawExtractedTask,
         *,
         exact_due_date: Optional[date] = None,
+        end_date: Optional[date] = None,
         date_resolution_error: Optional[str] = None,
     ) -> "AcademicTask":
         """Build a validated task from stage-2 output plus stage-3's verdict.
@@ -264,6 +284,7 @@ class AcademicTask(BaseModel):
             course_name=raw.course_name,
             task_name=raw.task_name,
             exact_due_date=exact_due_date,
+            end_date=end_date,
             grading_weight=raw.grading_weight,
             task_description=raw.task_description,
             raw_date_expression=raw.raw_date_expression,

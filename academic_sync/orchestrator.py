@@ -266,12 +266,17 @@ def _stage_3_and_4_resolve_and_validate(
     resolved_count = 0
 
     for raw in raw_tasks:
-        exact_date, error = _resolve_one(resolver, raw)
-        if exact_date is not None:
+        start, end, error = _resolve_one(resolver, raw)
+        if start is not None:
             resolved_count += 1
         # Construction runs the validator, which computes the review flags.
         tasks.append(
-            AcademicTask.from_raw(raw, exact_due_date=exact_date, date_resolution_error=error)
+            AcademicTask.from_raw(
+                raw,
+                exact_due_date=start,
+                end_date=end,
+                date_resolution_error=error,
+            )
         )
 
     logger.info(
@@ -285,17 +290,22 @@ def _stage_3_and_4_resolve_and_validate(
 
 def _resolve_one(
     resolver: DateResolver, raw: RawExtractedTask
-) -> Tuple[Optional[date], Optional[str]]:
-    """Resolve one expression into ``(date, None)`` or ``(None, reason)``.
+) -> Tuple[Optional[date], Optional[date], Optional[str]]:
+    """Resolve one expression into ``(start, end, None)`` or ``(None, None, reason)``.
+
+    Uses the span-aware entry point so a genuine multi-day period ("End
+    Semester Examinations, Dec 9 - Dec 23") survives as an event rather than
+    being refused. ``end`` is ``None`` for an ordinary single-day deadline.
 
     The unresolvable path is a normal, expected outcome — not an error to be
     swallowed. The reason string travels into ``needs_review.json`` so a human
     can see exactly why the phrase defeated the resolver.
     """
     if not (raw.raw_date_expression or "").strip():
-        return None, "the syllabus states no due date for this task"
+        return None, None, "the syllabus states no due date for this task"
     try:
-        return resolver.resolve(raw.raw_date_expression), None
+        span = resolver.resolve_span(raw.raw_date_expression)
+        return span.start, span.end, None
     except UnresolvableDateError as exc:
         logger.info(
             "unresolved: %r (%s / %s) — %s",
@@ -304,7 +314,7 @@ def _resolve_one(
             raw.task_name,
             exc.reason,
         )
-        return None, exc.reason
+        return None, None, exc.reason
 
 
 # ---------------------------------------------------------------------------

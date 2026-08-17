@@ -195,14 +195,23 @@ class CalendarSyncer:
         """
         assert task.exact_due_date is not None
         due = task.exact_due_date
+        # ``end_date`` is inclusive on our model; Google's all-day end.date is
+        # exclusive, so a span always ends the day after its last day. A
+        # single-day task falls out of the same expression.
+        last_day = task.end_date or due
 
         description_lines = [
             task.task_description or "",
             "",
             f"Course: {task.course_name}",
-            f"Weight: {task.grading_weight}",
+            f"Weight: {task.grading_weight or 'not stated'}",
             f"Syllabus wording: {task.raw_date_expression!r}",
         ]
+        if task.end_date:
+            description_lines.append(
+                f"Spans {due.isoformat()} to {task.end_date.isoformat()} "
+                f"({(task.end_date - due).days + 1} days)"
+            )
         if task.source_page:
             description_lines.append(f"Source: syllabus page {task.source_page}")
         description_lines += [
@@ -216,7 +225,7 @@ class CalendarSyncer:
             "summary": f"[{task.course_name}] {task.task_name}",
             "description": "\n".join(line for line in description_lines).strip(),
             "start": {"date": due.isoformat()},
-            "end": {"date": (due + timedelta(days=1)).isoformat()},
+            "end": {"date": (last_day + timedelta(days=1)).isoformat()},
             "transparency": "transparent",  # a deadline should not show as busy
             # The idempotency anchor. Private properties are invisible to
             # attendees and survive user edits to the title/description.
