@@ -50,6 +50,9 @@ def _is_ignored(relative_path: str) -> bool:
         "sync_state.json",
         "output/extracted_tasks.json",
         "output/needs_review.json",
+        # The web app's workspace; may hold a Notion token.
+        "academic_sync.db",
+        "academic_sync.db-journal",
         "run.log",
         # Environment.
         ".venv/pyvenv.cfg",

@@ -29,6 +29,10 @@ sync_state.json
 # extracted_tasks.json, needs_review.json
 output/
 
+# Web app workspace: your tasks, sync records, and possibly a Notion token
+academic_sync.db
+academic_sync.db-*
+
 *.log
 
 # --- Python ---------------------------------------------------------------
