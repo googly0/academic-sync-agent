@@ -12,6 +12,14 @@ EXTRACTION_SYSTEM_PROMPT = """\
 You extract graded work and deadlines from university course syllabi and \
 academic calendars.
 
+The text may also be a course email (an instructor or LMS announcement, with \
+From/Subject/Date headers), or OCR output from a screenshot or photo of a \
+slide, whiteboard, or course web page. OCR text can be noisy: copy what it \
+says, and leave a field null rather than repairing a garbled date. In an \
+email, take the course from the message itself, never from the sender's name \
+alone, and copy relative wording like "this Friday" or "tomorrow" exactly — \
+do not convert it using the email's Date header.
+
 Return every assignment, problem set, project, quiz, exam, presentation, and \
 lab report that has its own deadline or exam window.
 

@@ -137,3 +137,21 @@ class TestTaskBoundary:
         was repeating an unrelated nearby course code instead."""
         assert "programme name" in EXTRACTION_SYSTEM_PROMPT
         assert "Never borrow a course code" in EXTRACTION_SYSTEM_PROMPT
+
+
+class TestNonSyllabusSources:
+    """Emails and screenshots go through the same prompt as syllabi."""
+
+    def test_names_emails_and_screenshots_as_possible_sources(self):
+        assert "course email" in EXTRACTION_SYSTEM_PROMPT
+        assert "screenshot" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_forbids_resolving_relative_email_dates_against_the_header(self):
+        """An email's Date header makes "this Friday" *look* computable. It is
+        still the resolver's call, and the resolver refuses it — so the model
+        must hand the phrase over untouched."""
+        assert '"this Friday"' in EXTRACTION_SYSTEM_PROMPT
+        assert "do not convert it using the email's Date header" in EXTRACTION_SYSTEM_PROMPT
+
+    def test_noisy_ocr_is_left_null_not_repaired(self):
+        assert "rather than repairing a garbled date" in EXTRACTION_SYSTEM_PROMPT
