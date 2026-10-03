@@ -9,3 +9,4 @@ pdf2image>=1.17,<2.0        # rasterises scanned PDF pages for OCR
 # --- Dev / test ------------------------------------------------------------
 pytest>=8.0,<9.0
 pgserver>=0.1               # embedded Postgres, for the store parity tests
+tomli>=2.0; python_version < "3.11"   # reads pyproject.toml in the packaging test

@@ -1,5 +1,37 @@
-# Only Vercel reads this file. It names the ASGI app to serve, because the repo
-# root also holds main.py (the CLI), which Vercel's auto-detection would pick
-# first and reject. Runtime dependencies stay in requirements.txt.
+# Read by Vercel, which installs from this file when it exists (not from
+# requirements.txt) and serves the app named below. Local installs still use
+# requirements*.txt; tests/test_packaging.py fails if the two lists drift.
+[project]
+name = "academic-sync-agent"
+version = "0.1.0"
+description = "Turns syllabi, emails and screenshots into confirmed deadlines on your calendar"
+requires-python = ">=3.10"
+dependencies = [
+    "PyPDF2>=3.0,<4.0",
+    "Pillow>=10.0,<12.0",
+    "anthropic>=0.40,<1.0",
+    "python-dateutil>=2.9,<3.0",
+    "pydantic>=2.7,<3.0",
+    "google-api-python-client>=2.100,<3.0",
+    "google-auth>=2.30,<3.0",
+    "google-auth-oauthlib>=1.2,<2.0",
+    "google-auth-httplib2>=0.2,<1.0",
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.29,<1.0",
+    "python-multipart>=0.0.9,<1.0",
+    "sqlalchemy>=2.0,<3.0",
+    "psycopg[binary]>=3.1,<4.0",
+    "cryptography>=42",
+    "itsdangerous>=2.1,<3.0",
+    "requests>=2.31,<3.0",
+    "python-dotenv>=1.0,<2.0",
+]
+
+[tool.uv]
+# An application, not a library: nothing to build or install as a package.
+package = false
+
+# The repo root also holds main.py (the CLI), which Vercel's auto-detection
+# would pick first and reject, so the ASGI app is named explicitly.
 [tool.vercel]
 entrypoint = "app:app"
