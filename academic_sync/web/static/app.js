@@ -532,7 +532,7 @@ function renderAdd() {
   if (S.addMode === "screenshot") {
     const ocr = S.data.connections.ocr_problem;
     panel = `<div class="card">
-      ${ocr ? `<div class="error-box" style="margin:0 0 14px">Screenshots need OCR: ${esc(ocr)}. On macOS: <span class="mono">brew install tesseract</span></div>` : ""}
+      ${ocr ? `<div class="error-box" style="margin:0 0 14px">Screenshots can't be read yet: ${esc(ocr)}.${/tesseract/i.test(ocr) ? ' On macOS: <span class="mono">brew install tesseract</span>' : ""}</div>` : ""}
       <div class="drop" id="img-drop">
         <div class="big">Drop screenshots or photos here</div>
         <div class="sub">or click to choose · or just press <kbd>⌘</kbd> <kbd>V</kbd> anywhere to paste one</div>
@@ -615,10 +615,12 @@ function jobPanel(job) {
          <button class="btn" data-go="upcoming">${icon("calendar")}See Upcoming</button>
          ${r.flagged ? `<button class="btn primary" data-go="inbox">${icon("inbox")}Review ${r.flagged}</button>` : ""}</div>`
     : "";
+  const empty = job.status === "done" && r && r.empty_pages && r.empty_pages.length
+    ? `<div class="error-box">Page${r.empty_pages.length === 1 ? "" : "s"} ${r.empty_pages.join(", ")} had no readable text (scanned?), so any deadlines on ${r.empty_pages.length === 1 ? "it" : "them"} were missed. Upload ${r.empty_pages.length === 1 ? "it" : "them"} as screenshots.</div>` : "";
   return `<div class="card job"><h3>${esc(job.label)}</h3>
     <div class="stages">${keys.map((k) => `<div class="stage ${job.stages[k].state}"><span class="s-dot"></span>
       <span class="s-name">${STAGE_LABELS[k]}</span><span class="s-msg">${esc(job.stages[k].message)}</span></div>`).join("")}</div>
-    ${job.status === "error" ? `<div class="error-box">${esc(job.error)}</div>` : ""}${summary}</div>`;
+    ${job.status === "error" ? `<div class="error-box">${esc(job.error)}</div>` : ""}${empty}${summary}</div>`;
 }
 
 function bindAddInputs(root) {

@@ -24,7 +24,6 @@ work and is tested without a server.
 
 from __future__ import annotations
 
-import functools
 import logging
 import re
 import secrets
@@ -52,7 +51,6 @@ except ImportError as exc:  # pragma: no cover - environment problem
         "pip install -r requirements.txt"
     ) from exc
 
-from ..extraction.image_extractor import ocr_available as _ocr_available
 from ..extraction.llm import available_backends
 from ..orchestrator import PipelineError
 from ..sources.gmail import DEFAULT_QUERY
@@ -421,17 +419,11 @@ def _state(workspace: Workspace) -> Dict[str, Any]:
         "connections": {
             "google": workspace.google_status(),
             "notion": workspace.notion_status(),
-            "ocr_problem": ocr_available(),
+            "ocr_problem": workspace.image_reader_problem(),
         },
         "sources": store.sources()[:30],
         "tasks": workspace.task_views(),
     }
-
-
-@functools.lru_cache(maxsize=1)
-def ocr_available() -> Optional[str]:
-    """Cached: probing for tesseract spawns a process, and /api/state is hot."""
-    return _ocr_available()
 
 
 def main() -> None:
