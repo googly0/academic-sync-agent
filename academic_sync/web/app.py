@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import secrets
 import shutil
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -45,6 +45,7 @@ try:
     from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
+    from starlette.concurrency import run_in_threadpool
 except ImportError as exc:  # pragma: no cover - environment problem
     raise RuntimeError(
         "the web UI needs FastAPI and python-multipart: "
@@ -57,6 +58,7 @@ from ..orchestrator import PipelineError
 from ..sources.gmail import DEFAULT_QUERY
 from ..store import Store
 from ..workspace import Workspace, WorkspaceError, WorkspacePaths, default_backend
+from .auth import HostedAuth
 
 logger = logging.getLogger(__name__)
 
@@ -66,152 +68,152 @@ STATIC_DIR = Path(__file__).parent / "static"
 #: handful of pages; a 50MB upload is a mistake or an attack, not a syllabus.
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
-#: Finished jobs are kept so the browser can poll for the result, but not
-#: forever — this is a local server, not a job queue.
-MAX_RETAINED_JOBS = 40
-
 TOKEN_HEADER = "x-app-token"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
+#: Job ids may be chosen by the browser (see ``Jobs.run``), so they are checked.
+JOB_ID_RE = re.compile(r"^[a-z0-9]{8,32}$")
 
-@dataclass
-class Job:
-    """One long-running action, tracked across the polls that observe it."""
-
-    id: str
-    kind: str
-    label: str
-    status: str = "queued"  # queued | running | done | error
-    stages: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "label": self.label,
-            "status": self.status,
-            "stages": self.stages,
-            "result": self.result,
-            "error": self.error,
-        }
+Work = Callable[[Callable[[str, str, str], None]], Dict[str, Any]]
 
 
-class JobStore:
-    """In-memory job table with a lock, since a background thread writes to it
-    while request handlers read from it."""
+class Jobs:
+    """Long-running actions, tracked in the database.
 
-    def __init__(self) -> None:
-        self._jobs: Dict[str, Job] = {}
-        self._order: List[str] = []
-        self._lock = threading.Lock()
+    A serverless function has no memory between requests, so a poll that lands
+    on a different instance than the request doing the work can only see the
+    job if it lives in the database. Progress is therefore written there as
+    the work goes.
 
-    def create(self, kind: str, label: str) -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, label=label)
-        with self._lock:
-            self._jobs[job.id] = job
-            self._order.append(job.id)
-            while len(self._order) > MAX_RETAINED_JOBS:
-                self._jobs.pop(self._order.pop(0), None)
-        return job
+    The **browser picks the job id** and sends it with the request. That lets
+    it start polling at once, even when — hosted — the request itself stays
+    open until the work finishes. A poll that arrives before the job row
+    exists simply gets a 404 and tries again.
+    """
 
-    def get(self, job_id: str) -> Optional[Job]:
-        with self._lock:
-            return self._jobs.get(job_id)
+    def __init__(self, store: Store) -> None:
+        self._store = store
 
-    def update(self, job_id: str, **fields: Any) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            for key, value in fields.items():
-                setattr(job, key, value)
+    def get(self, job_id: str) -> Optional[Dict[str, Any]]:
+        return self._store.get_job(job_id)
 
-    def set_stage(self, job_id: str, stage: str, state: str, message: str) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            # Replace the dict rather than mutating in place so a reader
-            # holding the old reference always sees a consistent snapshot.
-            stages = dict(job.stages)
-            stages[stage] = {"state": state, "message": message}
-            job.stages = stages
-
-    def start(
+    def launch(
         self,
         kind: str,
         label: str,
-        work: Callable[[Callable[[str, str, str], None]], Dict[str, Any]],
+        work: Work,
         *,
+        job_id: Optional[str] = None,
         cleanup: Optional[Callable[[], None]] = None,
-    ) -> Job:
-        """Run ``work(progress)`` on a daemon thread and track it as a job."""
-        job = self.create(kind, label)
+        inline: bool = False,
+    ) -> str:
+        """Create a job and run ``work(progress)``.
+
+        ``inline=False`` (local) runs it on a daemon thread and returns at
+        once. ``inline=True`` (hosted) runs it in the calling thread, because
+        a frozen serverless function would kill a background thread.
+        """
+        job_id = job_id or uuid.uuid4().hex[:12]
+        if not JOB_ID_RE.match(job_id):
+            raise HTTPException(400, "bad job id")
+        if self._store.get_job(job_id) is not None:
+            raise HTTPException(409, "that job id is already in use")
+        self._store.create_job(job_id, kind, label)
 
         def run() -> None:
-            self.update(job.id, status="running")
+            self._store.update_job(job_id, status="running")
 
             def progress(stage: str, state: str, message: str) -> None:
-                self.set_stage(job.id, stage, state, message)
+                self._store.set_job_stage(job_id, stage, state, message)
 
             try:
-                self.update(job.id, status="done", result=work(progress))
+                self._store.update_job(job_id, status="done", result=work(progress))
             except (PipelineError, WorkspaceError) as exc:
                 # Expected, user-fixable failures (no API key, unreadable PDF,
                 # no Google credentials). These messages were written to be
                 # actionable, so they are surfaced verbatim.
-                logger.info("job %s failed: %s", job.id, exc)
-                self.update(job.id, status="error", error=str(exc))
+                logger.info("job %s failed: %s", job_id, exc)
+                self._store.update_job(job_id, status="error", error=str(exc))
             except Exception as exc:  # genuinely unexpected: log the trace, show the gist
-                logger.exception("job %s crashed", job.id)
-                self.update(job.id, status="error", error=f"unexpected error: {exc}")
+                logger.exception("job %s crashed", job_id)
+                self._store.update_job(job_id, status="error", error=f"unexpected error: {exc}")
             finally:
                 if cleanup is not None:
                     cleanup()
 
-        threading.Thread(target=run, daemon=True).start()
-        return job
+        if inline:
+            run()
+        else:
+            threading.Thread(target=run, daemon=True).start()
+        return job_id
 
 
-def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
-    """Build the FastAPI application over the workspace at ``paths``."""
-    app = FastAPI(title="Academic Sync Agent", docs_url="/api/docs")
-    store = Store(paths.db)
-    workspace = Workspace(store, paths)
-    jobs = JobStore()
+def create_app(
+    paths: WorkspacePaths = WorkspacePaths(),
+    *,
+    workspace: Optional[Workspace] = None,
+    hosted: Optional[HostedAuth] = None,
+) -> Any:
+    """Build the FastAPI application.
+
+    Locally, call it with no arguments: a SQLite workspace at ``paths``, no
+    login, a per-launch request token. Hosted, ``vercel_app`` passes a
+    workspace backed by Postgres and a ``HostedAuth``, which replaces the
+    token check with sign-in and a session-derived token.
+    """
+    app = FastAPI(title="Academic Sync Agent", docs_url=None if hosted else "/api/docs")
+    workspace = workspace or Workspace(Store(paths.db), paths)
+    jobs = Jobs(workspace.store)
     token = secrets.token_urlsafe(24)
     app.state.workspace = workspace
     app.state.token = token
 
-    @app.middleware("http")
-    async def require_token(request: Request, call_next: Any) -> Any:
-        if request.method in ("POST", "PATCH", "PUT", "DELETE"):
-            if not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), token):
-                return JSONResponse({"detail": "missing or invalid app token"}, status_code=403)
-        return await call_next(request)
+    if hosted is not None:
+        app.middleware("http")(hosted.guard)
+        app.include_router(hosted.router())
+    else:
+
+        @app.middleware("http")
+        async def require_token(request: Request, call_next: Any) -> Any:
+            if request.method in ("POST", "PATCH", "PUT", "DELETE"):
+                if not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), token):
+                    return JSONResponse({"detail": "missing or invalid app token"}, status_code=403)
+            return await call_next(request)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    def request_token(request: Request) -> str:
+        if hosted is not None:
+            return hosted.token_for(request.state.session)
+        return token
+
+    def launch(kind: str, label: str, work: Work, **kwargs: Any) -> Dict[str, Any]:
+        # Hosted: run to completion inside this request (see Jobs.launch).
+        job_id = jobs.launch(kind, label, work, inline=workspace.hosted, **kwargs)
+        return {"job_id": job_id}
+
     @app.get("/")
-    def index() -> Any:
+    def index(request: Request) -> Any:
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        return HTMLResponse(html.replace("__APP_TOKEN__", token))
+        return HTMLResponse(html.replace("__APP_TOKEN__", request_token(request)))
 
     # -- reads ---------------------------------------------------------------
 
     @app.get("/api/state")
-    def state() -> Any:
+    def state(request: Request) -> Any:
         """Everything the shell needs on load: semester, tasks, connections."""
-        return _state(workspace)
+        data = _state(workspace)
+        if hosted is not None:
+            data["hosted"] = {"email": request.state.session["email"]}
+            data["connections"]["google"]["client_configured"] = True
+        return data
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> Any:
         job = jobs.get(job_id)
         if job is None:
             raise HTTPException(404, "unknown job")
-        return JSONResponse(job.to_dict())
+        return JSONResponse(job)
 
     @app.get("/api/demo-pdf")
     def demo_pdf() -> Any:
@@ -224,9 +226,9 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
     # -- settings ------------------------------------------------------------
 
     @app.post("/api/settings")
-    def settings(values: Dict[str, Any] = Body(...)) -> Any:
+    def settings(request: Request, values: Dict[str, Any] = Body(...)) -> Any:
         _run(lambda: workspace.update_settings(values))
-        return _state(workspace)
+        return state(request)
 
     # -- imports -------------------------------------------------------------
 
@@ -235,6 +237,7 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
         file: UploadFile = File(...),
         backend: Optional[str] = Form(None),
         model: Optional[str] = Form(None),
+        job_id: Optional[str] = Form(None),
     ) -> Any:
         name = file.filename or "syllabus.pdf"
         if not name.lower().endswith(".pdf"):
@@ -243,21 +246,23 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
         scratch = Path(tempfile.mkdtemp(prefix="acadsync-"))
         pdf_path = scratch / "upload.pdf"
         pdf_path.write_bytes(await _read_upload(file))
-        job = jobs.start(
+        return await run_in_threadpool(
+            launch,
             "import",
             name,
             lambda progress: workspace.import_pdf(
                 pdf_path, label=name, backend=backend, model=model, progress=progress
             ),
+            job_id=job_id,
             cleanup=lambda: shutil.rmtree(scratch, ignore_errors=True),
         )
-        return {"job_id": job.id}
 
     @app.post("/api/import/images")
     async def import_images(
         files: List[UploadFile] = File(...),
         backend: Optional[str] = Form(None),
         model: Optional[str] = Form(None),
+        job_id: Optional[str] = Form(None),
     ) -> Any:
         _check_backend(backend)
         if not files:
@@ -280,15 +285,16 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
             label = "Pasted screenshot"
         if len(files) > 1:
             label += f" (+{len(files) - 1} more)"
-        job = jobs.start(
+        return await run_in_threadpool(
+            launch,
             "import",
             label,
             lambda progress: workspace.import_images(
                 paths, label=label, backend=backend, model=model, progress=progress
             ),
+            job_id=job_id,
             cleanup=lambda: shutil.rmtree(scratch, ignore_errors=True),
         )
-        return {"job_id": job.id}
 
     @app.post("/api/import/gmail")
     def import_gmail(options: Dict[str, Any] = Body(default={})) -> Any:
@@ -301,14 +307,14 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
             max_results = max(1, min(int(options.get("max_results") or 25), 100))
         except (TypeError, ValueError):
             raise HTTPException(400, "max_results must be a number") from None
-        job = jobs.start(
+        return launch(
             "import",
             "Gmail scan",
             lambda progress: workspace.import_gmail(
                 query=query, max_results=max_results, backend=backend, progress=progress
             ),
+            job_id=options.get("job_id"),
         )
-        return {"job_id": job.id}
 
     # -- sync & connections --------------------------------------------------
 
@@ -316,23 +322,25 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
     def sync(options: Dict[str, Any] = Body(...)) -> Any:
         targets = options.get("targets") or []
         task_ids = options.get("task_ids")
-        job = jobs.start(
+        return launch(
             "sync",
             "Sync",
             lambda progress: workspace.sync(targets, task_ids=task_ids, progress=progress),
+            job_id=options.get("job_id"),
         )
-        return {"job_id": job.id}
 
     @app.post("/api/connections/google")
-    def connect_google() -> Any:
+    def connect_google(options: Dict[str, Any] = Body(default={})) -> Any:
+        if hosted is not None:
+            # Consent happens in the browser, via the same sign-in round trip.
+            return {"redirect": "/auth/login"}
         if not workspace.paths.credentials.exists():
             raise HTTPException(
                 400,
                 f"{workspace.paths.credentials} not found — download an OAuth Desktop "
                 "client JSON from Google Cloud Console first (see the setup steps).",
             )
-        job = jobs.start("connect", "Connect Google", workspace.connect_google)
-        return {"job_id": job.id}
+        return launch("connect", "Connect Google", workspace.connect_google, job_id=options.get("job_id"))
 
     @app.post("/api/connections/notion")
     def connect_notion(options: Dict[str, Any] = Body(...)) -> Any:
@@ -345,25 +353,25 @@ def create_app(paths: WorkspacePaths = WorkspacePaths()) -> Any:
 
     @app.delete("/api/connections/notion")
     def disconnect_notion() -> Any:
-        workspace.store.set_settings({"notion_token": None, "notion_database_id": None})
+        workspace.disconnect_notion()
         return _state(workspace)
 
     # -- tasks ---------------------------------------------------------------
 
     @app.post("/api/tasks")
-    def add_task(fields: Dict[str, Any] = Body(...)) -> Any:
+    def add_task(request: Request, fields: Dict[str, Any] = Body(...)) -> Any:
         _run(lambda: workspace.add_manual(fields))
-        return _state(workspace)
+        return state(request)
 
     @app.patch("/api/tasks/{task_id}")
-    def fix_task(task_id: int, changes: Dict[str, Any] = Body(...)) -> Any:
+    def fix_task(request: Request, task_id: int, changes: Dict[str, Any] = Body(...)) -> Any:
         _run(lambda: workspace.fix_task(task_id, changes))
-        return _state(workspace)
+        return state(request)
 
     @app.delete("/api/tasks/{task_id}")
-    def dismiss_task(task_id: int) -> Any:
+    def dismiss_task(request: Request, task_id: int) -> Any:
         _run(lambda: workspace.dismiss(task_id))
-        return _state(workspace)
+        return state(request)
 
     async def _read_upload(file: UploadFile) -> bytes:
         payload = await file.read()

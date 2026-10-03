@@ -133,15 +133,35 @@ function toast(msg, bad = false) {
   setTimeout(() => el.remove(), bad ? 7000 : 3800);
 }
 
-async function pollJob(id, onUpdate) {
+async function pollJob(id, onUpdate, aborted = () => false) {
   for (;;) {
+    if (aborted()) return null;
     let job;
+    // Until the server has created the job row this 404s; keep trying.
     try { job = await api("GET", `/api/jobs/${id}`); }
-    catch (e) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+    catch (e) { await new Promise((r) => setTimeout(r, 800)); continue; }
     onUpdate(job);
     if (job.status === "done" || job.status === "error") return job;
     await new Promise((r) => setTimeout(r, 600));
   }
+}
+
+const newJobId = () =>
+  [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Start a job and follow it. The browser chooses the id and sends it along, so
+// polling begins at once — essential when the server (deployed, serverless)
+// holds the request open until the work is finished instead of returning early.
+async function runJob(url, body, onUpdate) {
+  const id = newJobId();
+  if (body instanceof FormData) body.append("job_id", id);
+  else body = { ...body, job_id: id };
+  let failure = null;
+  const post = api("POST", url, body).catch((e) => { failure = e; });
+  const job = await pollJob(id, onUpdate, () => failure !== null);
+  await post;
+  if (failure) throw failure;
+  return job;
 }
 
 async function refresh() {
@@ -191,6 +211,12 @@ function render() {
 }
 
 function renderSidebar() {
+  const acct = $("#account");
+  acct.hidden = !S.data.hosted;
+  if (S.data.hosted) {
+    acct.innerHTML = `<div class="acct-email" title="${esc(S.data.hosted.email)}">${esc(S.data.hosted.email)}</div>
+      <button class="ghost small" data-act="sign-out" type="button">Sign out</button>`;
+  }
   const sem = S.data.semester;
   $("#semester-label").textContent = sem
     ? `${sem.name}${currentWeek() > 0 ? ` · Week ${currentWeek()}` : ""}`
@@ -622,10 +648,9 @@ function addImages(files) {
 
 async function startImport(url, body, label) {
   try {
-    const { job_id } = await api("POST", url, body);
-    S.importJob = { id: job_id, label, status: "queued", stages: {} };
+    S.importJob = { label, status: "queued", stages: {} };
     render();
-    const job = await pollJob(job_id, (j) => { S.importJob = j; if (S.view === "add") renderAdd(); });
+    const job = await runJob(url, body, (j) => { S.importJob = j; if (S.view === "add") renderAdd(); });
     if (job.status === "done") {
       if (url.includes("images")) { S.images.forEach((i) => URL.revokeObjectURL(i.url)); S.images = []; }
       if (url.includes("pdf")) S.pdf = null;
@@ -758,10 +783,9 @@ async function handleAction(name, el, e) {
         const targets = $$('#sync-pop input[name="target"]:checked').map((i) => i.value);
         if (!targets.length) return toast("Pick at least one place to sync to.", true);
         S.syncOpen = false;
-        const { job_id } = await api("POST", "/api/sync", { targets });
         S.syncJob = { status: "running", stages: {} };
         render();
-        const job = await pollJob(job_id, (j) => { S.syncJob = j; if (S.view === "upcoming") renderUpcoming(); });
+        const job = await runJob("/api/sync", { targets }, (j) => { S.syncJob = j; if (S.view === "upcoming") renderUpcoming(); });
         await refresh();
         if (job.status === "error") toast(job.error, true);
         else {
@@ -805,7 +829,10 @@ async function handleAction(name, el, e) {
         break;
       }
       case "connect-google": {
-        const { job_id } = await api("POST", "/api/connections/google");
+        const res = await api("POST", "/api/connections/google", {});
+        // Deployed, consent is a normal redirect through Google and back.
+        if (res.redirect) { location.href = res.redirect; return; }
+        const { job_id } = res;
         S.googleJob = { status: "running", stages: {} };
         render();
         const job = await pollJob(job_id, (j) => { S.googleJob = j; });
@@ -813,6 +840,10 @@ async function handleAction(name, el, e) {
         if (job.status === "done") toast("Google connected.");
         break;
       }
+      case "sign-out":
+        await api("POST", "/auth/logout", {});
+        location.href = "/";
+        break;
       case "disconnect-notion": setState(await api("DELETE", "/api/connections/notion")); toast("Notion disconnected."); break;
     }
   } catch (err) { toast(err.message, true); }

@@ -72,9 +72,30 @@ class Semester:
 
 
 class Workspace:
-    def __init__(self, store: Store, paths: WorkspacePaths = WorkspacePaths()) -> None:
+    def __init__(
+        self,
+        store: Store,
+        paths: WorkspacePaths = WorkspacePaths(),
+        *,
+        hosted: bool = False,
+        token_store: Any = None,
+        box: Any = None,
+    ) -> None:
+        """
+        Args:
+            hosted: running on a serverless host. The Calendar checkpoint then
+                lives in the database (there is no disk), and imports do not
+                spawn threads.
+            token_store: where Google's token lives; ``None`` means
+                ``paths.token`` on disk, as locally.
+            box: a ``SecretsBox``. When given, the Notion token is stored
+                encrypted in the database rather than as a plain setting.
+        """
         self.store = store
         self.paths = paths
+        self.hosted = hosted
+        self.token_store = token_store
+        self.box = box
 
     # -- settings ----------------------------------------------------------
 
@@ -104,6 +125,8 @@ class Workspace:
                 clean[key] = str(value)
             elif key == "day_first":
                 clean[key] = "1" if value in (True, "1", "true", "on") else "0"
+            elif key == "notion_token":
+                self._set_notion_token((str(value).strip() if value is not None else "") or None)
             elif key in SETTING_KEYS:
                 text = (str(value).strip() if value is not None else "") or None
                 clean[key] = text
@@ -354,7 +377,9 @@ class Workspace:
         from .calendar_sync.auth import google_status
 
         return google_status(
-            credentials_path=self.paths.credentials, token_path=self.paths.token
+            credentials_path=self.paths.credentials,
+            token_path=self.paths.token,
+            token_store=self.token_store,
         )
 
     def connect_google(self, progress: Optional[ProgressCallback] = None) -> Dict[str, Any]:
@@ -369,6 +394,7 @@ class Workspace:
                 credentials_path=self.paths.credentials,
                 token_path=self.paths.token,
                 allow_interactive=True,
+                token_store=self.token_store,
             )
         except CalendarAuthError as exc:
             raise WorkspaceError(str(exc)) from exc
@@ -384,15 +410,34 @@ class Workspace:
                 credentials_path=self.paths.credentials,
                 token_path=self.paths.token,
                 allow_interactive=False,
+                token_store=self.token_store,
             )
         except CalendarAuthError as exc:
             raise WorkspaceError(str(exc)) from exc
+
+    def _get_notion_token(self) -> Optional[str]:
+        if self.box is not None:
+            ciphertext = self.store.get_secret("notion_token")
+            return self.box.decrypt(ciphertext) if ciphertext else None
+        return self.store.get_setting("notion_token")
+
+    def _set_notion_token(self, token: Optional[str]) -> None:
+        if self.box is None:
+            self.store.set_settings({"notion_token": token})
+        elif token is None:
+            self.store.delete_secret("notion_token")
+        else:
+            self.store.put_secret("notion_token", self.box.encrypt(token))
+
+    def disconnect_notion(self) -> None:
+        self._set_notion_token(None)
+        self.store.set_settings({"notion_database_id": None})
 
     def notion_settings(self) -> Dict[str, Optional[str]]:
         import os
 
         return {
-            "token": self.store.get_setting("notion_token") or os.environ.get("NOTION_TOKEN"),
+            "token": self._get_notion_token() or os.environ.get("NOTION_TOKEN"),
             "database_id": self.store.get_setting("notion_database_id")
             or os.environ.get("NOTION_DATABASE_ID"),
         }
@@ -410,10 +455,9 @@ class Workspace:
             info = syncer.ensure_schema()
         except NotionSyncError as exc:
             raise WorkspaceError(_notion_hint(exc)) from exc
-        values: Dict[str, Optional[str]] = {"notion_database_id": syncer.database_id}
+        self.store.set_settings({"notion_database_id": syncer.database_id})
         if token and token != os_env("NOTION_TOKEN"):
-            values["notion_token"] = token
-        self.store.set_settings(values)
+            self._set_notion_token(token)
         return info
 
     def notion_status(self) -> Dict[str, Any]:
@@ -464,17 +508,19 @@ class Workspace:
         from .calendar_sync.auth import build_calendar_service
         from .calendar_sync.errors import CalendarAuthError
         from .calendar_sync.google_calendar import CalendarSyncer
-        from .calendar_sync.state import StateFileError, SyncState
+        from .calendar_sync.state import DbSyncState, StateFileError, SyncState
 
         calendar_id = self.target_scope(TARGET_GCAL)
         _emit(progress, "sync_gcal", "running", f"syncing {len(tasks)} task(s) to Google Calendar")
         try:
-            state = SyncState.load(self.paths.state)
+            # Hosted there is no disk, so the checkpoint is a database table.
+            state = DbSyncState(self.store) if self.hosted else SyncState.load(self.paths.state)
             if service is None:
                 service = build_calendar_service(
                     credentials_path=self.paths.credentials,
                     token_path=self.paths.token,
                     allow_interactive=False,
+                    token_store=self.token_store,
                 )
         except (StateFileError, CalendarAuthError) as exc:
             _emit(progress, "sync_gcal", "failed", "")
