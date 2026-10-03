@@ -29,7 +29,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import PipelineConfig
 from .extraction.llm import LLMExtractionError, create_extractor
-from .extraction.pdf_extractor import PDFExtractionError, PDFTextExtractor
+from .extraction.pdf_extractor import PageText, PDFExtractionError, PDFTextExtractor
 from .models.task import AcademicTask, RawExtractedTask
 from .resolution import DateResolver, UnresolvableDateError
 
@@ -81,6 +81,10 @@ class _Progress:
         self._callback = callback
         self._timings = timings
 
+    @property
+    def timings(self) -> Dict[str, float]:
+        return self._timings
+
     def emit(self, stage: str, state: str, message: str = "") -> None:
         if self._callback is None:
             return
@@ -127,35 +131,9 @@ def run_pipeline(
         document = _stage_1_extract_text(config)
     tracker.emit("extract_text", "done", f"{len(document.pages)} page(s)")
 
-    with tracker.stage("extract_facts", f"querying {config.llm_backend}"):
-        raw_tasks = _stage_2_extract_facts(config, document)
-    tracker.emit("extract_facts", "done", f"{len(raw_tasks)} task(s) found")
-
-    with tracker.stage("resolve_dates", "resolving dates deterministically"):
-        tasks = _stage_3_and_4_resolve_and_validate(config, raw_tasks)
-    resolved = sum(1 for t in tasks if t.exact_due_date is not None)
-    tracker.emit("resolve_dates", "done", f"{resolved}/{len(tasks)} resolved")
-
-    with tracker.stage("validate", "applying the review gate"):
-        syncable = [t for t in tasks if t.is_syncable]
-        needs_review = [t for t in tasks if t.requires_manual_review]
-
-        result = PipelineResult(
-            all_tasks=tasks,
-            syncable=syncable,
-            needs_review=needs_review,
-            ocr_pages=document.ocr_page_numbers,
-            dry_run=config.dry_run,
-            stage_timings=timings,
-        )
-        _write_outputs(config, result)
-    tracker.emit("validate", "done", f"{len(syncable)} pass, {len(needs_review)} flagged")
-
-    logger.info(
-        "validation gate: %d syncable, %d flagged for manual review",
-        len(syncable),
-        len(needs_review),
-    )
+    result = _analyze(config, document.pages, source_name=config.pdf_path.name, tracker=tracker)
+    _write_outputs(config, result)
+    syncable = result.syncable
 
     if config.dry_run:
         logger.info("dry run: skipping Google Calendar entirely")
@@ -167,6 +145,90 @@ def run_pipeline(
         result.sync_report = _stage_5_sync(config, syncable)
     tracker.emit("sync", "done", result.sync_report.summary())
     return result
+
+
+def analyze_pages(
+    config: PipelineConfig,
+    pages: Sequence[PageText],
+    *,
+    source_name: str,
+    progress: Optional[ProgressCallback] = None,
+) -> PipelineResult:
+    """Run stages 2–4 on text that came from somewhere other than a PDF.
+
+    An email body, a screenshot's OCR output, or a pasted announcement all
+    reduce to ``PageText``. From there the pipeline is identical: the LLM copies
+    date phrases verbatim, the resolver computes them, and the review gate
+    decides what is safe. Never syncs and never writes the JSON reports —
+    callers that persist results own that.
+    """
+    return _analyze(
+        config, pages, source_name=source_name, tracker=_Progress(progress, {})
+    )
+
+
+def _analyze(
+    config: PipelineConfig,
+    pages: Sequence[PageText],
+    *,
+    source_name: str,
+    tracker: _Progress,
+) -> PipelineResult:
+    """Stages 2–4, shared by the PDF pipeline and :func:`analyze_pages`."""
+    with tracker.stage("extract_facts", f"querying {config.llm_backend}"):
+        raw_tasks = _stage_2_extract_facts(config, pages, source_name)
+    tracker.emit("extract_facts", "done", f"{len(raw_tasks)} task(s) found")
+
+    with tracker.stage("resolve_dates", "resolving dates deterministically"):
+        tasks = _stage_3_and_4_resolve_and_validate(config, raw_tasks)
+    resolved = sum(1 for t in tasks if t.exact_due_date is not None)
+    tracker.emit("resolve_dates", "done", f"{resolved}/{len(tasks)} resolved")
+
+    with tracker.stage("validate", "applying the review gate"):
+        syncable = [t for t in tasks if t.is_syncable]
+        needs_review = [t for t in tasks if t.requires_manual_review]
+        result = PipelineResult(
+            all_tasks=tasks,
+            syncable=syncable,
+            needs_review=needs_review,
+            ocr_pages=[p.page_number for p in pages if p.source == "ocr"],
+            dry_run=config.dry_run,
+            stage_timings=tracker.timings,
+        )
+    tracker.emit("validate", "done", f"{len(syncable)} pass, {len(needs_review)} flagged")
+
+    logger.info(
+        "validation gate: %d syncable, %d flagged for manual review",
+        len(syncable),
+        len(needs_review),
+    )
+    return result
+
+
+def build_resolver(config: PipelineConfig) -> DateResolver:
+    """The stage-3 resolver for ``config``'s semester.
+
+    Public so that a human correcting a flagged task goes through exactly the
+    same resolver — with the same plausibility window — as the pipeline did.
+    """
+    return DateResolver(
+        config.semester_start_date,
+        week_start_weekday=config.week_start_weekday,
+        grace_days_before=config.grace_days_before,
+        max_horizon_days=config.max_horizon_days,
+        day_first=config.day_first_dates,
+    )
+
+
+def resolve_raw_task(resolver: DateResolver, raw: RawExtractedTask) -> AcademicTask:
+    """Resolve one raw task's date and build the validated model.
+
+    The single-task form of stages 3+4, for manual entry and review fixes.
+    """
+    start, end, error = _resolve_one(resolver, raw)
+    return AcademicTask.from_raw(
+        raw, exact_due_date=start, end_date=end, date_resolution_error=error
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +272,9 @@ def _stage_1_extract_text(config: PipelineConfig):
 # ---------------------------------------------------------------------------
 
 
-def _stage_2_extract_facts(config: PipelineConfig, document) -> List[RawExtractedTask]:
+def _stage_2_extract_facts(
+    config: PipelineConfig, pages: Sequence[PageText], source_name: str
+) -> List[RawExtractedTask]:
     logger.info("[2/5] semantic extraction via %r", config.llm_backend)
     try:
         extractor = create_extractor(
@@ -227,8 +291,8 @@ def _stage_2_extract_facts(config: PipelineConfig, document) -> List[RawExtracte
 
     try:
         raw_tasks = extractor.extract(
-            document.pages,
-            source_name=config.pdf_path.name,
+            pages,
+            source_name=source_name,
             course_hint=config.course_hint,
         )
     except LLMExtractionError as exc:
@@ -254,13 +318,7 @@ def _stage_3_and_4_resolve_and_validate(
     config: PipelineConfig, raw_tasks: Sequence[RawExtractedTask]
 ) -> List[AcademicTask]:
     logger.info("[3/5] resolving dates (deterministic, no LLM)")
-    resolver = DateResolver(
-        config.semester_start_date,
-        week_start_weekday=config.week_start_weekday,
-        grace_days_before=config.grace_days_before,
-        max_horizon_days=config.max_horizon_days,
-        day_first=config.day_first_dates,
-    )
+    resolver = build_resolver(config)
 
     tasks: List[AcademicTask] = []
     resolved_count = 0

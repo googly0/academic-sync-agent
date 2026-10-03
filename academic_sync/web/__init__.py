@@ -5,8 +5,8 @@ run the tool from a terminal. Start it with::
 
     python -m academic_sync.web
 
-Everything runs locally and every analysis is a dry run — the web UI cannot
-write to a calendar, by construction (see ``app.py``).
+Everything runs locally. Imports only analyse and store; nothing reaches a
+calendar or Notion until the user presses Sync (see ``app.py``).
 """
 
 __all__ = ["create_app"]

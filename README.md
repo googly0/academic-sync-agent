@@ -1,12 +1,58 @@
 # Autonomous Academic Management Agent
 
 Extracts assignment deadlines, grading weights, and exam dates from messy course
-syllabus PDFs and syncs them to Google Calendar.
+syllabus PDFs, course emails, and screenshots, and syncs them to Google Calendar
+and Notion.
 
 The design goal is **explicit failure over cleverness**. Anything the pipeline
 cannot establish with certainty is flagged for a human and written to
 `needs_review.json` — it is never guessed at, and never silently dropped. A
 fabricated due date is worse than no due date, because nobody checks it.
+
+---
+
+## The web app
+
+```bash
+python -m academic_sync.web        # then open http://127.0.0.1:8000
+```
+
+A local semester planner built on the same pipeline. Most deadlines never
+arrive as a syllabus PDF, so it takes them from wherever they actually show up:
+
+| Input | How |
+|---|---|
+| **Screenshots / photos** | Drop them in, or press ⌘V anywhere in the app. OCR'd with Tesseract, then the same stages 2–4 as a PDF. |
+| **Course emails** | *Scan inbox* searches Gmail (read-only) for instructor and Canvas announcements. Each email is analysed on its own and never scanned twice. |
+| **Syllabus PDFs** | The original pipeline. |
+| **Typed by hand** | "Week 6 Friday", "Oct 17" — resolved by the same deterministic resolver. |
+
+What you get:
+
+- **Upcoming**: confirmed deadlines on a week-by-week timeline, colour-coded
+  by course, each with its source's original wording and where it came from.
+- **Inbox**: everything the review gate flagged — `TBD`, "this Friday",
+  conflicting dates — as cards you fix by rewording or picking a date. A fix
+  goes back through the gate, so an edit can't skip the checks. Conflicting
+  dates show both quotes side by side.
+- **Sync**: one button pushes confirmed deadlines to **Google Calendar**
+  and/or a **Notion database**. Both are idempotent, so re-syncing never
+  duplicates. Each task shows whether it's synced to each one. If a task is
+  edited after syncing, it's marked as changed; the old event is never deleted
+  automatically.
+
+Imports only analyse and store tasks. Nothing leaves your machine until you
+press Sync. The server binds to localhost, and every request that changes
+something needs a per-launch token, so other websites can't send requests to
+it. State lives in `academic_sync.db` (gitignored; `--db` to move it).
+
+**Connections** (in the app): Google needs `credentials.json` as in
+[step 4](#4-google-calendar-credentials) below, with the **Gmail API** enabled
+too. Press *Connect Google* once to grant Calendar + read-only Gmail access.
+Notion needs an [internal integration](https://www.notion.so/my-integrations)
+secret and a database shared with it. Missing properties (Course, Due, Weight,
+Sync Key) are added for you. With no `ANTHROPIC_API_KEY`, the app defaults to
+the offline `stub` backend so you can try it without an API key.
 
 ---
 
@@ -83,8 +129,11 @@ academic-sync-agent/
 │   ├── orchestrator.py                 # the only module that spans stages
 │   ├── models/
 │   │   └── task.py                     # RawExtractedTask, AcademicTask
+│   ├── store.py                        # web app: SQLite workspace
+│   ├── workspace.py                    # web app: imports, fixes, sync
 │   ├── extraction/
 │   │   ├── pdf_extractor.py            # stage 1
+│   │   ├── image_extractor.py          # stage 1 for screenshots
 │   │   └── llm/                        # stage 2
 │   │       ├── base.py                 # LLMExtractor ABC  ← the seam
 │   │       ├── prompts.py
@@ -95,16 +144,26 @@ academic-sync-agent/
 │   ├── resolution/                     # stage 3
 │   │   ├── date_resolver.py
 │   │   └── errors.py
-│   └── calendar_sync/                  # stage 5
-│       ├── auth.py
-│       ├── state.py                    # checkpoint (no Google deps)
-│       ├── google_calendar.py          # idempotency + backoff
-│       └── errors.py
+│   ├── sources/
+│   │   └── gmail.py                    # course emails → PageText
+│   ├── calendar_sync/                  # stage 5
+│   │   ├── auth.py                     # Google OAuth (Calendar + Gmail)
+│   │   ├── state.py                    # checkpoint (no Google deps)
+│   │   ├── google_calendar.py          # idempotency + backoff
+│   │   └── errors.py
+│   ├── notion_sync/
+│   │   └── notion.py                   # Notion target, same guarantees
+│   └── web/
+│       ├── app.py                      # FastAPI, token-protected
+│       └── static/                     # index.html, app.css, app.js
 └── tests/
     ├── test_date_resolver.py           # 80+ cases — the deepest coverage
     ├── test_models.py
     ├── test_calendar_sync.py
-    └── test_sync_state.py
+    ├── test_sync_state.py
+    ├── test_store.py / test_workspace.py
+    ├── test_notion_sync.py / test_sources.py
+    └── test_web_api.py
 ```
 
 ---
@@ -147,7 +206,8 @@ also picks up an `ant auth login` profile, and a bare client works with that.
 
 1. Open the [Google Cloud Console](https://console.cloud.google.com/) and create
    (or select) a project.
-2. **APIs & Services → Library →** enable **Google Calendar API**.
+2. **APIs & Services → Library →** enable **Google Calendar API** (and
+   **Gmail API** if you'll import course emails in the web app).
 3. **APIs & Services → OAuth consent screen →** configure it. For personal use
    pick *External* and add your own Google account under **Test users**.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID →**
@@ -404,7 +464,7 @@ mistaken for the current one.
 ## Testing
 
 ```bash
-python -m pytest tests/ -q          # 129 tests
+python -m pytest tests/ -q
 python -m pytest tests/test_date_resolver.py -v
 ```
 

@@ -34,7 +34,9 @@ class PipelineConfig:
     """Everything one run needs. Constructed once, in the CLI."""
 
     # --- Input ------------------------------------------------------------
-    pdf_path: Path
+    #: ``None`` when the text comes from somewhere other than a PDF (an email,
+    #: a screenshot) and the caller drives stages 2–4 via ``analyze_pages``.
+    pdf_path: Optional[Path]
     semester_start_date: date
 
     # --- Stage 1: PDF / OCR ----------------------------------------------
