@@ -56,6 +56,49 @@ the offline `stub` backend so you can try it without an API key.
 
 ---
 
+## Deploying to Vercel
+
+The same app can run hosted, for one person, from any device. Local mode is
+unchanged; hosting is a second entry point (`app.py`) that swaps in:
+
+| | Local | Hosted |
+|---|---|---|
+| Data | SQLite file | Postgres (Neon) |
+| Login | none (localhost only) | Sign in with Google, one allow-listed email |
+| Google / Notion tokens | `token.json` / plain setting | encrypted in the database |
+| Screenshots | Tesseract | Claude vision |
+| Scanned PDFs | OCR'd | not supported — upload page screenshots |
+| Long jobs | background thread | run inside the request (up to 5 min) |
+
+**Setup**
+
+1. In Google Cloud, create an OAuth client of type **Web application** (not
+   Desktop). Enable the Calendar and Gmail APIs. Add this authorized redirect
+   URI: `https://<your-domain>/auth/callback`. Publish the consent screen
+   ("In production") — in Testing mode Google expires the refresh token after
+   7 days. Unverified is fine for a single user; you'll click through a warning.
+2. Import the repo in Vercel and add a **Neon** database from the Marketplace
+   (it sets `DATABASE_URL`).
+3. Set these environment variables:
+
+   | Variable | Value |
+   |---|---|
+   | `ALLOWED_EMAIL` | the one Google account allowed in |
+   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | from step 1 |
+   | `SESSION_SECRET` | `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+   | `TOKEN_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+   | `ANTHROPIC_API_KEY` | for extraction and reading screenshots |
+   | `APP_URL` | optional; your public URL, if the redirect URI is ever wrong |
+
+   If any are missing, the deployed site says exactly which instead of failing.
+4. Deploy, open the site, and sign in. Losing `TOKEN_ENCRYPTION_KEY` means
+   reconnecting Google and Notion once; nothing else is lost.
+
+The sign-in allow-list is what stops a stranger spending your Anthropic key or
+touching your calendar, so keep `ALLOWED_EMAIL` set to exactly one address.
+
+---
+
 ## Architecture
 
 Five stages. Each is a separate module, independently testable, and swappable
@@ -129,7 +172,8 @@ academic-sync-agent/
 │   ├── orchestrator.py                 # the only module that spans stages
 │   ├── models/
 │   │   └── task.py                     # RawExtractedTask, AcademicTask
-│   ├── store.py                        # web app: SQLite workspace
+│   ├── store.py                        # web app: SQLite or Postgres
+│   ├── secrets_box.py                  # encrypts stored tokens
 │   ├── workspace.py                    # web app: imports, fixes, sync
 │   ├── extraction/
 │   │   ├── pdf_extractor.py            # stage 1
@@ -155,7 +199,13 @@ academic-sync-agent/
 │   │   └── notion.py                   # Notion target, same guarantees
 │   └── web/
 │       ├── app.py                      # FastAPI, token-protected
+│       ├── auth.py                     # hosted Google sign-in + sessions
+│       ├── hosted_app.py               # wiring for Vercel
 │       └── static/                     # index.html, app.css, app.js
+├── app.py                              # Vercel entry point
+├── vercel.json
+├── requirements.txt                    # runtime (what Vercel installs)
+├── requirements-local.txt              # + OCR and test tools
 └── tests/
     ├── test_date_resolver.py           # 80+ cases — the deepest coverage
     ├── test_models.py
@@ -174,7 +224,7 @@ academic-sync-agent/
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-local.txt   # runtime + OCR + test tools
 ```
 
 ### 2. System dependencies (only needed for OCR)

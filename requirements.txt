@@ -7,9 +7,7 @@
 
 # --- Stage 1: PDF extraction -----------------------------------------------
 PyPDF2>=3.0,<4.0            # text-layer extraction for digital PDFs
-pdf2image>=1.17,<2.0        # rasterises pages for OCR (requires `poppler`)
-pytesseract>=0.3.10,<0.4    # Tesseract OCR bindings (requires `tesseract`)
-Pillow>=10.0,<12.0          # image backend used by pdf2image/pytesseract
+Pillow>=10.0,<12.0          # image handling (screenshots, OCR, vision)
 
 # --- Stage 2: Semantic extraction (LLM) ------------------------------------
 anthropic>=0.40,<1.0        # default LLMExtractor backend
@@ -36,8 +34,5 @@ cryptography>=42            # encrypts stored Google/Notion tokens
 itsdangerous>=2.1,<3.0      # signs session cookies and request tokens
 
 # --- Misc ------------------------------------------------------------------
+requests>=2.31,<3.0          # Notion API client
 python-dotenv>=1.0,<2.0     # loads ANTHROPIC_API_KEY etc. from .env
-
-# --- Dev / test ------------------------------------------------------------
-pytest>=8.0,<9.0
-pgserver>=0.1           # embedded Postgres, for store parity tests

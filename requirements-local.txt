@@ -1,0 +1,11 @@
+# Everything for running and developing locally: the runtime set plus OCR and tests.
+#   pip install -r requirements-local.txt
+-r requirements.txt
+
+# --- Local OCR (also needs the `tesseract` and `poppler` system packages) ---
+pytesseract>=0.3.10,<0.4    # Tesseract bindings
+pdf2image>=1.17,<2.0        # rasterises scanned PDF pages for OCR
+
+# --- Dev / test ------------------------------------------------------------
+pytest>=8.0,<9.0
+pgserver>=0.1               # embedded Postgres, for the store parity tests

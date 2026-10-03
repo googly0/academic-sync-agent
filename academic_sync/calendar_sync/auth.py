@@ -33,6 +33,9 @@ from .errors import CalendarAuthError
 
 logger = logging.getLogger(__name__)
 
+#: API descriptions for Calendar v3 and Gmail v1, copied from googleapiclient.
+DISCOVERY_DIR = Path(__file__).parent / "discovery"
+
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
@@ -264,10 +267,16 @@ def _load_token(tokens: Any) -> Optional[Any]:
 
 def _build(api: str, version: str, creds: Any) -> Any:
     try:
-        from googleapiclient.discovery import build
+        from googleapiclient.discovery import build, build_from_document
     except ImportError as exc:  # pragma: no cover - environment problem
         raise CalendarAuthError(
             "Google API client libraries are not installed; "
             "run `pip install -r requirements.txt`"
         ) from exc
+    # The two API descriptions we use are vendored. ``googleapiclient`` ships
+    # one for every Google API (over 100 MB), which would not fit in a
+    # serverless bundle, and fetching one at runtime is a needless network hop.
+    document = DISCOVERY_DIR / f"{api}.{version}.json"
+    if document.is_file():
+        return build_from_document(document.read_text(encoding="utf-8"), credentials=creds)
     return build(api, version, credentials=creds, cache_discovery=False)
