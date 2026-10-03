@@ -1,0 +1,15 @@
+.venv
+.git
+.claude
+.pytest_cache
+__pycache__
+tests
+output
+*.db
+*.db-*
+token.json
+credentials.json
+client_secret*.json
+sync_state.json
+.env
+.env.*

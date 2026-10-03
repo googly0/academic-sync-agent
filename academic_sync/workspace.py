@@ -72,9 +72,30 @@ class Semester:
 
 
 class Workspace:
-    def __init__(self, store: Store, paths: WorkspacePaths = WorkspacePaths()) -> None:
+    def __init__(
+        self,
+        store: Store,
+        paths: WorkspacePaths = WorkspacePaths(),
+        *,
+        hosted: bool = False,
+        token_store: Any = None,
+        box: Any = None,
+    ) -> None:
+        """
+        Args:
+            hosted: running on a serverless host. The Calendar checkpoint then
+                lives in the database (there is no disk), and imports do not
+                spawn threads.
+            token_store: where Google's token lives; ``None`` means
+                ``paths.token`` on disk, as locally.
+            box: a ``SecretsBox``. When given, the Notion token is stored
+                encrypted in the database rather than as a plain setting.
+        """
         self.store = store
         self.paths = paths
+        self.hosted = hosted
+        self.token_store = token_store
+        self.box = box
 
     # -- settings ----------------------------------------------------------
 
@@ -104,6 +125,8 @@ class Workspace:
                 clean[key] = str(value)
             elif key == "day_first":
                 clean[key] = "1" if value in (True, "1", "true", "on") else "0"
+            elif key == "notion_token":
+                self._set_notion_token((str(value).strip() if value is not None else "") or None)
             elif key in SETTING_KEYS:
                 text = (str(value).strip() if value is not None else "") or None
                 clean[key] = text
@@ -139,7 +162,9 @@ class Workspace:
             dry_run=True,
             output_dir=output_dir or Path(tempfile.gettempdir()),
             # A bad scan degrades to a warning in the UI rather than failing
-            # the whole import.
+            # the whole import. Hosted there is no Tesseract, so scanned PDF
+            # pages are skipped (and reported) rather than OCR'd.
+            ocr_enabled=not self.hosted,
             on_ocr_error="warn",
             calendar_id=self.store.get_setting("calendar_id") or "primary",
             credentials_path=self.paths.credentials,
@@ -164,10 +189,17 @@ class Workspace:
                 pdf_path=pdf_path, backend=backend, model=model, output_dir=scratch
             )
             result = run_pipeline(config, progress=progress)
+        except PipelineError as exc:
+            if self.hosted and "no text recovered" in str(exc):
+                raise WorkspaceError(
+                    "that PDF has no text layer (it looks scanned). The hosted app "
+                    "can't OCR PDFs — upload photos or screenshots of its pages instead."
+                ) from exc
+            raise
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         source_id = self.store.add_source("pdf", label)
-        return self._store_result(result.all_tasks, source_id)
+        return {**self._store_result(result.all_tasks, source_id), "empty_pages": result.empty_pages}
 
     def import_images(
         self,
@@ -177,15 +209,16 @@ class Workspace:
         backend: Optional[str] = None,
         model: Optional[str] = None,
         progress: Optional[ProgressCallback] = None,
+        image_extractor: Any = None,
     ) -> Dict[str, Any]:
-        """Screenshots or photos: OCR, then the same stages 2–4 as a PDF."""
-        from .extraction.image_extractor import ImageTextExtractor
+        """Screenshots or photos: read the text, then the same stages 2–4 as a PDF."""
         from .extraction.pdf_extractor import PDFExtractionError
 
         config = self.pipeline_config(backend=backend, model=model)
         _emit(progress, "extract_text", "running", f"reading {len(image_paths)} image(s)")
         try:
-            document = ImageTextExtractor(ocr_language=config.ocr_language).extract(image_paths)
+            extractor = image_extractor or self._image_extractor(config)
+            document = extractor.extract(image_paths)
         except PDFExtractionError as exc:
             _emit(progress, "extract_text", "failed", "")
             raise PipelineError(f"could not read the image: {exc}") from exc
@@ -250,6 +283,33 @@ class Workspace:
         _emit(progress, "extract_facts", "done", f"{len(new_ids)} email(s) read")
         _emit(progress, "validate", "done", f"{totals['added']} new task(s)")
         return {**totals, "emails": emails, "scanned": len(ids), "new_emails": len(new_ids)}
+
+    # -- image reading ---------------------------------------------------
+
+    def image_reader(self) -> str:
+        """``"vision"`` (Claude reads the image) or ``"tesseract"`` (local OCR).
+
+        Hosted there are no native binaries, so it is always vision. Locally it
+        is Tesseract unless ``IMAGE_READER=vision`` asks otherwise.
+        """
+        if self.hosted or os_env("IMAGE_READER") == "vision":
+            return "vision"
+        return "tesseract"
+
+    def image_reader_problem(self) -> Optional[str]:
+        """``None`` when screenshots can be read, else why not. For the UI."""
+        if self.image_reader() == "vision":
+            return None if os_env("ANTHROPIC_API_KEY") else "ANTHROPIC_API_KEY is not set"
+        from .extraction.image_extractor import ocr_available
+
+        return ocr_available()
+
+    def _image_extractor(self, config: PipelineConfig) -> Any:
+        from .extraction.image_extractor import ImageTextExtractor, VisionImageExtractor
+
+        if self.image_reader() == "vision":
+            return VisionImageExtractor()
+        return ImageTextExtractor(ocr_language=config.ocr_language)
 
     def add_manual(self, fields: Dict[str, Any]) -> StoredTask:
         """A task typed in by hand. Its date still goes through the resolver."""
@@ -354,7 +414,9 @@ class Workspace:
         from .calendar_sync.auth import google_status
 
         return google_status(
-            credentials_path=self.paths.credentials, token_path=self.paths.token
+            credentials_path=self.paths.credentials,
+            token_path=self.paths.token,
+            token_store=self.token_store,
         )
 
     def connect_google(self, progress: Optional[ProgressCallback] = None) -> Dict[str, Any]:
@@ -369,6 +431,7 @@ class Workspace:
                 credentials_path=self.paths.credentials,
                 token_path=self.paths.token,
                 allow_interactive=True,
+                token_store=self.token_store,
             )
         except CalendarAuthError as exc:
             raise WorkspaceError(str(exc)) from exc
@@ -384,15 +447,34 @@ class Workspace:
                 credentials_path=self.paths.credentials,
                 token_path=self.paths.token,
                 allow_interactive=False,
+                token_store=self.token_store,
             )
         except CalendarAuthError as exc:
             raise WorkspaceError(str(exc)) from exc
+
+    def _get_notion_token(self) -> Optional[str]:
+        if self.box is not None:
+            ciphertext = self.store.get_secret("notion_token")
+            return self.box.decrypt(ciphertext) if ciphertext else None
+        return self.store.get_setting("notion_token")
+
+    def _set_notion_token(self, token: Optional[str]) -> None:
+        if self.box is None:
+            self.store.set_settings({"notion_token": token})
+        elif token is None:
+            self.store.delete_secret("notion_token")
+        else:
+            self.store.put_secret("notion_token", self.box.encrypt(token))
+
+    def disconnect_notion(self) -> None:
+        self._set_notion_token(None)
+        self.store.set_settings({"notion_database_id": None})
 
     def notion_settings(self) -> Dict[str, Optional[str]]:
         import os
 
         return {
-            "token": self.store.get_setting("notion_token") or os.environ.get("NOTION_TOKEN"),
+            "token": self._get_notion_token() or os.environ.get("NOTION_TOKEN"),
             "database_id": self.store.get_setting("notion_database_id")
             or os.environ.get("NOTION_DATABASE_ID"),
         }
@@ -410,10 +492,9 @@ class Workspace:
             info = syncer.ensure_schema()
         except NotionSyncError as exc:
             raise WorkspaceError(_notion_hint(exc)) from exc
-        values: Dict[str, Optional[str]] = {"notion_database_id": syncer.database_id}
+        self.store.set_settings({"notion_database_id": syncer.database_id})
         if token and token != os_env("NOTION_TOKEN"):
-            values["notion_token"] = token
-        self.store.set_settings(values)
+            self._set_notion_token(token)
         return info
 
     def notion_status(self) -> Dict[str, Any]:
@@ -464,17 +545,19 @@ class Workspace:
         from .calendar_sync.auth import build_calendar_service
         from .calendar_sync.errors import CalendarAuthError
         from .calendar_sync.google_calendar import CalendarSyncer
-        from .calendar_sync.state import StateFileError, SyncState
+        from .calendar_sync.state import DbSyncState, StateFileError, SyncState
 
         calendar_id = self.target_scope(TARGET_GCAL)
         _emit(progress, "sync_gcal", "running", f"syncing {len(tasks)} task(s) to Google Calendar")
         try:
-            state = SyncState.load(self.paths.state)
+            # Hosted there is no disk, so the checkpoint is a database table.
+            state = DbSyncState(self.store) if self.hosted else SyncState.load(self.paths.state)
             if service is None:
                 service = build_calendar_service(
                     credentials_path=self.paths.credentials,
                     token_path=self.paths.token,
                     allow_interactive=False,
+                    token_store=self.token_store,
                 )
         except (StateFileError, CalendarAuthError) as exc:
             _emit(progress, "sync_gcal", "failed", "")

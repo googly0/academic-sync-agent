@@ -133,15 +133,35 @@ function toast(msg, bad = false) {
   setTimeout(() => el.remove(), bad ? 7000 : 3800);
 }
 
-async function pollJob(id, onUpdate) {
+async function pollJob(id, onUpdate, aborted = () => false) {
   for (;;) {
+    if (aborted()) return null;
     let job;
+    // Until the server has created the job row this 404s; keep trying.
     try { job = await api("GET", `/api/jobs/${id}`); }
-    catch (e) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+    catch (e) { await new Promise((r) => setTimeout(r, 800)); continue; }
     onUpdate(job);
     if (job.status === "done" || job.status === "error") return job;
     await new Promise((r) => setTimeout(r, 600));
   }
+}
+
+const newJobId = () =>
+  [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Start a job and follow it. The browser chooses the id and sends it along, so
+// polling begins at once — essential when the server (deployed, serverless)
+// holds the request open until the work is finished instead of returning early.
+async function runJob(url, body, onUpdate) {
+  const id = newJobId();
+  if (body instanceof FormData) body.append("job_id", id);
+  else body = { ...body, job_id: id };
+  let failure = null;
+  const post = api("POST", url, body).catch((e) => { failure = e; });
+  const job = await pollJob(id, onUpdate, () => failure !== null);
+  await post;
+  if (failure) throw failure;
+  return job;
 }
 
 async function refresh() {
@@ -191,6 +211,12 @@ function render() {
 }
 
 function renderSidebar() {
+  const acct = $("#account");
+  acct.hidden = !S.data.hosted;
+  if (S.data.hosted) {
+    acct.innerHTML = `<div class="acct-email" title="${esc(S.data.hosted.email)}">${esc(S.data.hosted.email)}</div>
+      <button class="ghost small" data-act="sign-out" type="button">Sign out</button>`;
+  }
   const sem = S.data.semester;
   $("#semester-label").textContent = sem
     ? `${sem.name}${currentWeek() > 0 ? ` · Week ${currentWeek()}` : ""}`
@@ -506,7 +532,7 @@ function renderAdd() {
   if (S.addMode === "screenshot") {
     const ocr = S.data.connections.ocr_problem;
     panel = `<div class="card">
-      ${ocr ? `<div class="error-box" style="margin:0 0 14px">Screenshots need OCR: ${esc(ocr)}. On macOS: <span class="mono">brew install tesseract</span></div>` : ""}
+      ${ocr ? `<div class="error-box" style="margin:0 0 14px">Screenshots can't be read yet: ${esc(ocr)}.${/tesseract/i.test(ocr) ? ' On macOS: <span class="mono">brew install tesseract</span>' : ""}</div>` : ""}
       <div class="drop" id="img-drop">
         <div class="big">Drop screenshots or photos here</div>
         <div class="sub">or click to choose · or just press <kbd>⌘</kbd> <kbd>V</kbd> anywhere to paste one</div>
@@ -589,10 +615,12 @@ function jobPanel(job) {
          <button class="btn" data-go="upcoming">${icon("calendar")}See Upcoming</button>
          ${r.flagged ? `<button class="btn primary" data-go="inbox">${icon("inbox")}Review ${r.flagged}</button>` : ""}</div>`
     : "";
+  const empty = job.status === "done" && r && r.empty_pages && r.empty_pages.length
+    ? `<div class="error-box">Page${r.empty_pages.length === 1 ? "" : "s"} ${r.empty_pages.join(", ")} had no readable text (scanned?), so any deadlines on ${r.empty_pages.length === 1 ? "it" : "them"} were missed. Upload ${r.empty_pages.length === 1 ? "it" : "them"} as screenshots.</div>` : "";
   return `<div class="card job"><h3>${esc(job.label)}</h3>
     <div class="stages">${keys.map((k) => `<div class="stage ${job.stages[k].state}"><span class="s-dot"></span>
       <span class="s-name">${STAGE_LABELS[k]}</span><span class="s-msg">${esc(job.stages[k].message)}</span></div>`).join("")}</div>
-    ${job.status === "error" ? `<div class="error-box">${esc(job.error)}</div>` : ""}${summary}</div>`;
+    ${job.status === "error" ? `<div class="error-box">${esc(job.error)}</div>` : ""}${empty}${summary}</div>`;
 }
 
 function bindAddInputs(root) {
@@ -622,10 +650,9 @@ function addImages(files) {
 
 async function startImport(url, body, label) {
   try {
-    const { job_id } = await api("POST", url, body);
-    S.importJob = { id: job_id, label, status: "queued", stages: {} };
+    S.importJob = { label, status: "queued", stages: {} };
     render();
-    const job = await pollJob(job_id, (j) => { S.importJob = j; if (S.view === "add") renderAdd(); });
+    const job = await runJob(url, body, (j) => { S.importJob = j; if (S.view === "add") renderAdd(); });
     if (job.status === "done") {
       if (url.includes("images")) { S.images.forEach((i) => URL.revokeObjectURL(i.url)); S.images = []; }
       if (url.includes("pdf")) S.pdf = null;
@@ -758,10 +785,9 @@ async function handleAction(name, el, e) {
         const targets = $$('#sync-pop input[name="target"]:checked').map((i) => i.value);
         if (!targets.length) return toast("Pick at least one place to sync to.", true);
         S.syncOpen = false;
-        const { job_id } = await api("POST", "/api/sync", { targets });
         S.syncJob = { status: "running", stages: {} };
         render();
-        const job = await pollJob(job_id, (j) => { S.syncJob = j; if (S.view === "upcoming") renderUpcoming(); });
+        const job = await runJob("/api/sync", { targets }, (j) => { S.syncJob = j; if (S.view === "upcoming") renderUpcoming(); });
         await refresh();
         if (job.status === "error") toast(job.error, true);
         else {
@@ -805,7 +831,10 @@ async function handleAction(name, el, e) {
         break;
       }
       case "connect-google": {
-        const { job_id } = await api("POST", "/api/connections/google");
+        const res = await api("POST", "/api/connections/google", {});
+        // Deployed, consent is a normal redirect through Google and back.
+        if (res.redirect) { location.href = res.redirect; return; }
+        const { job_id } = res;
         S.googleJob = { status: "running", stages: {} };
         render();
         const job = await pollJob(job_id, (j) => { S.googleJob = j; });
@@ -813,6 +842,10 @@ async function handleAction(name, el, e) {
         if (job.status === "done") toast("Google connected.");
         break;
       }
+      case "sign-out":
+        await api("POST", "/auth/logout", {});
+        location.href = "/";
+        break;
       case "disconnect-notion": setState(await api("DELETE", "/api/connections/notion")); toast("Notion disconnected."); break;
     }
   } catch (err) { toast(err.message, true); }

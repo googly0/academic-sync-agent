@@ -1,0 +1,5 @@
+# Only Vercel reads this file. It names the ASGI app to serve, because the repo
+# root also holds main.py (the CLI), which Vercel's auto-detection would pick
+# first and reject. Runtime dependencies stay in requirements.txt.
+[tool.vercel]
+entrypoint = "app:app"

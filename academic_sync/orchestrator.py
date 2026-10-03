@@ -58,6 +58,9 @@ class PipelineResult:
     syncable: List[AcademicTask] = field(default_factory=list)
     needs_review: List[AcademicTask] = field(default_factory=list)
     ocr_pages: List[int] = field(default_factory=list)
+    #: Pages that yielded no text at all. Deadlines on them were not seen, so
+    #: the caller must say so rather than present the result as complete.
+    empty_pages: List[int] = field(default_factory=list)
     dry_run: bool = False
     sync_report: Optional[object] = None  # calendar_sync.SyncReport, lazily typed
     #: Wall-clock seconds per stage. Useful for the UI, and for noticing that
@@ -192,6 +195,7 @@ def _analyze(
             syncable=syncable,
             needs_review=needs_review,
             ocr_pages=[p.page_number for p in pages if p.source == "ocr"],
+            empty_pages=[p.page_number for p in pages if p.source == "empty"],
             dry_run=config.dry_run,
             stage_timings=tracker.timings,
         )
