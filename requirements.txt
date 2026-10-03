@@ -29,8 +29,15 @@ fastapi>=0.110,<1.0         # local web interface
 uvicorn>=0.29,<1.0          # ASGI server for the web interface
 python-multipart>=0.0.9,<1.0  # multipart parsing for PDF upload
 
+# --- Storage & hosting (web app) -------------------------------------------
+sqlalchemy>=2.0,<3.0        # one store for SQLite (local) and Postgres (hosted)
+psycopg[binary]>=3.1,<4.0   # Postgres driver; only used when DATABASE_URL is set
+cryptography>=42            # encrypts stored Google/Notion tokens
+itsdangerous>=2.1,<3.0      # signs session cookies and request tokens
+
 # --- Misc ------------------------------------------------------------------
 python-dotenv>=1.0,<2.0     # loads ANTHROPIC_API_KEY etc. from .env
 
 # --- Dev / test ------------------------------------------------------------
 pytest>=8.0,<9.0
+pgserver>=0.1           # embedded Postgres, for store parity tests

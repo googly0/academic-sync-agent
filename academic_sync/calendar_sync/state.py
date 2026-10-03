@@ -218,3 +218,67 @@ class SyncState:
         if calendar_id is None:
             return sum(len(entries) for entries in self.calendars.values())
         return len(self.calendars.get(calendar_id, {}))
+
+
+class DbSyncState:
+    """The same checkpoint, kept in the web app's database.
+
+    A serverless function has no disk that outlives a request, so the
+    ``sync_state.json`` file is not an option there. This class has the methods
+    ``CalendarSyncer`` uses, and writes **through**: ``mark_synced`` commits
+    immediately, so — as with the file — a crash one event later cannot lose
+    the record of this one. ``store`` is the web app's ``Store`` (duck-typed so
+    this module keeps no database dependency).
+    """
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def is_synced(self, dedupe_key: str, calendar_id: str) -> bool:
+        return self.get(dedupe_key, calendar_id) is not None
+
+    def get(self, dedupe_key: str, calendar_id: str) -> Optional[SyncedRecord]:
+        for row in self._store.checkpoint_rows(calendar_id):
+            if row["dedupe_key"] == dedupe_key:
+                return SyncedRecord(
+                    event_id=row["event_id"],
+                    synced_at=row["synced_at"],
+                    course_name=row["course_name"],
+                    task_name=row["task_name"],
+                    due_date=row["due_date"],
+                )
+        return None
+
+    def mark_synced(
+        self,
+        dedupe_key: str,
+        calendar_id: str,
+        *,
+        event_id: str,
+        course_name: Optional[str] = None,
+        task_name: Optional[str] = None,
+        due_date: Optional[str] = None,
+    ) -> SyncedRecord:
+        record = SyncedRecord(
+            event_id=event_id,
+            synced_at=_utc_now(),
+            course_name=course_name,
+            task_name=task_name,
+            due_date=due_date,
+        )
+        self._store.checkpoint_put(
+            calendar_id,
+            dedupe_key,
+            event_id=event_id,
+            synced_at=record.synced_at,
+            course_name=course_name,
+            task_name=task_name,
+            due_date=due_date,
+        )
+        return record
+
+    def forget(self, dedupe_key: str, calendar_id: str) -> None:
+        self._store.checkpoint_delete(calendar_id, dedupe_key)
+
+    def save(self) -> None:
+        """No-op: every ``mark_synced`` already committed."""
