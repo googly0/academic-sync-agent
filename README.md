@@ -54,6 +54,69 @@ secret and a database shared with it. Missing properties (Course, Due, Weight,
 Sync Key) are added for you. With no `ANTHROPIC_API_KEY`, the app defaults to
 the offline `stub` backend so you can try it without an API key.
 
+### Running it locally for free (Ollama, no API key)
+
+Everything below runs on your Mac. Nothing is hosted and nothing costs money.
+
+**One-time setup**
+
+1. Install the local model server and OCR:
+   ```bash
+   brew install ollama tesseract
+   ```
+2. Run Ollama in the background (it also starts at every login), then download
+   the model once (~5 GB):
+   ```bash
+   brew services start ollama
+   ollama pull llama3.1:8b
+   ```
+   On a Mac with 8 GB of memory, `llama3.2:3b` is faster but less accurate.
+3. Put `credentials.json` (a **Desktop app** OAuth client, see
+   [step 4](#4-google-calendar-credentials)) in the project root.
+4. Start the app (see below), then in **Settings** choose backend **ollama**,
+   model `llama3.1:8b`, and your semester's name and start date.
+5. Under **Connections**, press **Connect Google** and finish the sign-in in the
+   tab that opens. The app waits 5 minutes for it. A sign-in finished after
+   that lands on a "can't connect to localhost:<port>" page; press Connect
+   Google again.
+
+**Every time**
+
+```bash
+cd ~/academic-sync-agent
+source .venv/bin/activate
+python -m academic_sync.web        # then open http://127.0.0.1:8000
+```
+
+Stop it with `Ctrl+C`. Ollama keeps running in the background; check it with
+`ollama list`, or run `brew services start ollama` if the app can't reach it.
+
+Never start the app with `--host 0.0.0.0` or put it behind a public tunnel:
+locally it has no login, so anyone who can reach it can use your Google account.
+
+**Staying connected to Google**
+
+`token.json` holds a refresh token, and the app renews access silently on
+every run, so you only sign in once. It stops working only if Google revokes
+the refresh token:
+
+- **The OAuth app is in Testing.** Google expires Testing-mode refresh tokens
+  after **7 days**. To avoid that, in Google Cloud → Google Auth Platform, fill
+  in **Branding**, then under **Audience** press **Publish app**. You don't need
+  Google's verification for personal use; you'll click through an "unverified
+  app" warning once.
+- **You change your Google password.** Tokens with Gmail access are revoked.
+- **It goes unused for 6 months.** Google expires the token, and may delete the
+  unused OAuth client.
+- **A university (Workspace) account's admin** can restrict or revoke
+  third-party access at any time. If that happens, use a personal Gmail
+  account and add it under **Audience → Test users**.
+
+A revoked token isn't visible on the Connections page, which still says
+connected. It shows up when a sync or inbox scan can't refresh the token and
+asks you to sign in again; press **Connect Google** and finish the sign-in. `token.json` is a live credential: it is gitignored, so keep
+it in the project root and never share it.
+
 ---
 
 ## Deploying to Vercel
